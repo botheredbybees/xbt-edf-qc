@@ -1,0 +1,40 @@
+// MK21 EXPORT DATA FILE  (EDF)
+// File Information
+Raw Data Filename:  202425030_TestProbe_20250301180000
+// System Information
+Units            :  Metric
+// Probe Information
+Probe Type       :  TestProbe
+Terminal Depth   :  0 m
+Depth Equation   :
+Depth Coeff. 1   :  0.0
+Depth Coeff. 2   :  6.472
+Depth Coeff. 3   :  -0.00216
+Depth Coeff. 4   :  0.0
+// Launch Information
+Num Info Fields  :  6
+Date of Launch   :  03/01/2025
+Time of Launch   :  18:00:00
+Sequence Number  :  00000
+Latitude         :  45 19.56440S
+Longitude        :  144 46.65540E
+Serial Number    :  TestProbe
+// Memo
+Test probe on 202425030
+// Hardware
+MK21 Device      :  LMC16 Ethernet
+// Information - XBT
+Salinity         :  34.68 ppt
+// Post-Processing
+Operations       :  None
+// Data Fields
+Num Data Fields  :  5
+Field1           :  Time (sec)
+Field2           :  Resistance (ohms)
+Field3           :  Depth (m)
+Field4           :  Temperature (C)
+Field5           :  Sound Velocity (m/s)
+// Data
+0.0	8429.000	0.0000	20.001	1500.00
+0.1	8429.001	0.6472	20.002	1500.00
+0.2	8429.002	1.2943	20.003	1500.00

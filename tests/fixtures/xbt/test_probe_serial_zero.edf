@@ -1,0 +1,40 @@
+// MK21 EXPORT DATA FILE  (EDF)
+// File Information
+Raw Data Filename:  VT1A_testprobe20230807033912
+// System Information
+Units            :  Metric
+// Probe Information
+Probe Type       :  T-5
+Terminal Depth   :  1830 m
+Depth Equation   :
+Depth Coeff. 1   :  0.0
+Depth Coeff. 2   :  6.828
+Depth Coeff. 3   :  -0.00182
+Depth Coeff. 4   :  0.0
+// Launch Information
+Num Info Fields  :  6
+Date of Launch   :  08/07/2023
+Time of Launch   :  03:39:12
+Sequence Number  :  00002
+Latitude         :  45 43.92430S
+Longitude        :  150 55.72640E
+Serial Number    :  0
+// Memo
+Test probe
+// Hardware
+MK21 Device      :  LMC16 Ethernet
+// Information - XBT
+Salinity         :  34.68 ppt
+// Post-Processing
+Operations       :  None
+// Data Fields
+Num Data Fields  :  5
+Field1           :  Time (sec)
+Field2           :  Resistance (ohms)
+Field3           :  Depth (m)
+Field4           :  Temperature (C)
+Field5           :  Sound Velocity (m/s)
+// Data
+0.0	15120.500	0.0000	1.51	1463.79
+0.1	15120.400	0.6828	1.51	1463.80
+0.2	15120.300	1.3655	1.51	1463.81

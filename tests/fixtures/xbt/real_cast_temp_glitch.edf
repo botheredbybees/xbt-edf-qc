@@ -1,0 +1,44 @@
+// MK21 EXPORT DATA FILE  (EDF)
+// File Information
+Raw Data Filename:  202425030_DB_20250301203416
+// System Information
+Units            :  Metric
+// Probe Information
+Probe Type       :  DB
+Terminal Depth   :  760 m
+Depth Equation   :
+Depth Coeff. 1   :  0.0
+Depth Coeff. 2   :  6.472
+Depth Coeff. 3   :  -0.00216
+Depth Coeff. 4   :  0.0
+// Launch Information
+Num Info Fields  :  6
+Date of Launch   :  03/01/2025
+Time of Launch   :  20:34:16
+Sequence Number  :  00001
+Latitude         :  45 19.56440S
+Longitude        :  144 46.65540E
+Serial Number    :  1396178
+// Memo
+DeepBlue XBT on 202425030
+// Hardware
+MK21 Device      :  LMC16 Ethernet
+// Information - XBT
+Salinity         :  34.68 ppt
+// Post-Processing
+Operations       :  None
+// Data Fields
+Num Data Fields  :  5
+Field1           :  Time (sec)
+Field2           :  Resistance (ohms)
+Field3           :  Depth (m)
+Field4           :  Temperature (C)
+Field5           :  Sound Velocity (m/s)
+// Data
+0.3	8400.635	1.9414	13.56	1501.70
+0.4	8424.787	2.5885	13.50	1501.51
+70.7	11438.150	473.6423	7.12	-99
+70.8	1648.674	474.2994	-99	-99
+70.9	7.767	474.9564	-99	-99
+71.0	1.668	475.6134	13.48	1501.40
+71.1	15.856	476.2703	13.47	1501.39

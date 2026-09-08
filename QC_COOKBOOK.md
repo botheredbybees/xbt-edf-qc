@@ -1,0 +1,208 @@
+# QC Cookbook — what this pipeline actually checks, and why
+
+This document exists because the two source cookbooks it's built from
+aren't included here (they're separate copyrighted documents — see
+[References](#references)), and because *why a check exists in this exact
+shape* lives in commit messages and code comments that are easy to miss.
+It was written jointly: a human (Peter Shanks, AADC) read both cookbook
+editions and made the calls on what to automate and how conservative to be;
+an AI assistant (Claude, Anthropic) did the implementation, ran the
+validation described below, and drafted this write-up from that session's
+findings. Treat it as a design record, not a spec handed down from the
+cookbooks themselves — where this pipeline's behaviour differs from a
+literal reading of either cookbook, that's called out explicitly below.
+
+## The two source documents
+
+| | Edition | Authors | What it's cited for here |
+|---|---|---|---|
+| v1.1 | *Quality Control Cookbook for XBT Data*, CSIRO Marine Laboratories Report 221 (1994) | Bailey, Gronell, Phillips, Tanner & Meyers | Section-by-section descriptions, accept/reject codes, and every numeric threshold used below |
+| v2.1 | *Australian XBT Quality Control Cookbook* (2022) | Cowley & Krummel, CSIRO | `XBT_fault_and_feature_flag_type`'s Appendix F bitmask values |
+
+Both describe the same underlying phenomena; v1.1's prose is what's quoted
+throughout, since it's the edition this pipeline had full text access to
+while these checks were built. If you have the 2022 edition and its
+thresholds differ from what's below, that's worth resolving — see
+[Open questions](#open-questions).
+
+## Checks implemented
+
+Every check below only **flags** — none of them correct, interpolate, or
+delete a value. `HISTORY_PREVIOUS_VALUE` is always the fill for exactly this
+reason: these checks never have a genuine "previous value" to report.
+
+### Test Probe detection (not a per-point check, but gates everything else)
+
+A self-test cast (the recorder's own built-in calibration check, not a real
+deployed probe) is identified by *any* of: "test" (case-insensitive) in the
+Serial Number, Memo, or source filename; or the cookbook's own documented
+signature (v1.1 section 2.2): isothermal at ~1.5±0.15°C **from the very
+first (surface) sample**, for at least half the cast. The surface
+requirement matters — a genuine Southern Ocean cast can be isothermal near
+1-2°C at depth without being a test probe, but a real deployed probe's
+surface reading is the actual sea-surface temperature, never suspiciously
+pinned at 1.5°C.
+
+Self-test casts are excluded from the published NetCDF, but a *failed*
+self-test (temperature variation ≥0.005°C, `TEST_PROBE_MAX_TEMPERATURE_VARIATION_C`)
+still gets a warning logged before it's dropped — the cookbook frames this
+as a recorder-health alarm ("repeated failures can indicate poor earthing
+or other system errors"), not a per-profile data flag, so it has to surface
+somewhere other than a QC flag nobody downstream will ever read.
+
+### Surface Spikes — CS (v1.1 section 2.1)
+
+> "Surface spikes are caused by a minor start-up transient problem that
+> leads to inaccurate temperature measurements in the top few metres... The
+> CSA flag is applied to all XBT profiles in which the surface spike is
+> undetectable below 3.7 m depth, as the start-up transient problem is
+> ubiquitous... Surface data is removed to 3.7 m depth and replaced with
+> 99.99 to indicate no data."
+
+Applied unconditionally to every real (non-test-probe) cast: TEMP above
+**3.7 m** is set to `NaN` (→ `GTSPP_MISSING` once written). Not a per-cast
+judgement call — the cookbook's own framing is that this is universal
+housekeeping, not a defect being flagged.
+
+**Not implemented:** the Reject variant (CSR — the transient detected
+*below* 3.7 m and judged to actually affect the data). Distinguishing that
+from real near-surface thermal structure needs the same kind of operator
+judgement call the cookbook itself requires to disambiguate PE from TE
+(next section) — this pipeline doesn't have that input.
+
+### Isolated readings with no real neighbours — SP (v1.1 sections 3.2 "Wire
+Break" and 3.3 "Spikes")
+
+A real TEMP value is flagged if **both** immediate neighbours (one
+shallower, one deeper) are missing. This is the shape of a wire-break or
+end-of-cast fault: "a short circuit causes the temperature readings to go
+off scale" (section 3.2), leaving a stray reading that survived alone past
+the point the rest of the cast had already failed.
+
+**This is narrower than a literal reading of section 3.3.** The cookbook
+describes "Spikes" as any isolated deviation from *real* neighbours, with
+a >0.2°C threshold and a standard reference-average formula (average the
+two neighbours, flag the point between them if it deviates by more than
+the threshold — the same formula used in, e.g., the IOOS/QARTOD real-time
+QC manuals). **That version was built, then dropped after validation** —
+see [What we tried and rejected](#what-we-tried-and-rejected) below. Only
+the zero-real-neighbours case ships.
+
+### Speed check — PE / TE (v1.1 section 4.2.4/4.2.5)
+
+Implausible ship speed (>25 knots, `MAX_PLAUSIBLE_SPEED_KNOTS`) implied
+between two consecutive real casts' positions and launch times. The
+cookbook treats a failed check as evidence of *either* a position error
+(PE) or a time error (TE) — two distinct codes, two distinct metadata
+targets — and is explicit that disambiguating them is an operator
+judgement call made against log sheets and a track plot. An automated
+check can't make that call, so **both** codes are emitted together, each
+downgrading only its own metadata field (LATITUDE/LONGITUDE for PE,
+TIME for TE), and both `HISTORY_QC_FLAG_DESCRIPTION`s say plainly the check
+couldn't tell them apart. Both are Reject-variant consequences: TEMP
+downgraded from the surface, DEPTH left alone (Table 2).
+
+### Probe-type check — PR (v1.1 section 4.2.6)
+
+The EDF header's Probe Type field checked against the ship's actual stocked
+probes. An unrecognised value downgrades TEMP *and* DEPTH from the surface
+— DEPTH too, because depth is derived from the probe-specific fall-rate
+equation, so a wrong probe type invalidates the whole depth axis, not just
+the indexed temperatures (cites Cheng et al. 2016).
+
+### Physical-plausibility range check — RC
+
+Every published variable's own declared `valid_min`/`valid_max` enforced
+against its *real* data, per-point for the depth-indexed variables (TEMP,
+DEPTH, SOUND_VELOCITY) and per-profile for the scalars (LATITUDE,
+LONGITUDE). This exists because it *didn't*, once: a resistance/connector
+glitch wrote a literal `-99` fault sentinel into TEMP, and it published as
+GTSPP flag 1 ("good") because TEMP had a correct `valid_min`/`valid_max`
+attribute but nothing ever checked real data against it. The same audit
+found LATITUDE/LONGITUDE had the same gap (declared but unenforced), and
+DEPTH/SOUND_VELOCITY had no declared range at all. All four `_VALID_MIN`/
+`_VALID_MAX` constants are the *single* source of truth for both the
+NetCDF attribute and this check, specifically so metadata and enforcement
+can't drift apart again.
+
+`TEMP_VALID_MIN`/`MAX` (-2.5/40.0°C) are the cookbook/GTSPP convention.
+`DEPTH_VALID_MAX` (2500 m) is the MK21 ISA manual's deepest-rated
+ship-stocked probe (T-5, 1830 m) plus margin — not a guess.
+`SOUND_VELOCITY_VALID_MIN`/`MAX` (1400/1560 m/s) is a pragmatic engineering
+bound, validated against real historical data before trusting it (see
+below) rather than invented.
+
+## What we tried and rejected
+
+**The single most important thing in this document, if you're extending
+this pipeline for your own instrument or ship:** a threshold that looks
+reasonable on paper can still be wrong, and the only way to find out is to
+run it against your *own* real historical archive before shipping it.
+
+The "Spikes" check originally compared every point against the average of
+its two immediate neighbours and flagged a >0.2°C deviation — the standard
+formula, straight from the cookbook's own numeric threshold. Run against
+the full 368-profile real historical archive this pipeline was built
+against, it fired **97 times**, and inspection showed most of those were
+**genuine real oceanographic fine-scale structure** — small step-like
+temperature wiggles at 400-600 m depth, exactly what v1.1 section 5
+("Structure / Signal Leakage Flags") describes as a real feature caused by
+small-scale mixing, *not* a fault:
+
+```
+idx=666 depth=421.45 temp=1.92
+idx=667 depth=422.07 temp=1.83
+idx=668 depth=422.69 temp=1.74
+idx=669 depth=423.31 temp=1.54   <- flagged, real data
+idx=670 depth=423.93 temp=1.76
+idx=671 depth=424.55 temp=1.93   <- flagged, real data
+idx=672 depth=425.16 temp=1.68
+```
+
+Section 5's own text is explicit that telling this apart from a
+malfunction needs "verification with neighbouring (or repeat) profiles and
+previous knowledge of the region" — an input this pipeline doesn't have,
+same as the CSR/PE-TE cases above. The check was narrowed to only the
+zero-real-neighbours case (no threshold, no false positives on real
+structure — an isolated point with nothing on either side to compare
+against at all is unambiguous, regardless of its value), re-validated
+against the same 368 profiles: **23 genuine faults, all 30-37°C at depths
+where that's physically impossible for real Southern Ocean water, zero
+apparent false positives.**
+
+**"Wire Stretch" (v1.1 sections 4.4/4.5)** — a sustained, real-looking
+warming trend with depth over a wide range — was found in the same real
+data (a ~7°C ramp over 33 m, suspiciously close to perfectly linear) but
+was **not automated at all**. The cookbook's own text is explicit that
+telling a genuine wire stretch apart from a real temperature inversion
+needs neighbour/repeat-drop confirmation: "the approach... is to be
+conservative... only those features that have been confirmed... are
+flagged as real." A cast with this fault shape isn't left completely
+unflagged in practice, though — `SOUND_VELOCITY` is computed from the same
+corrupted temperature, so it usually still trips the existing
+`SOUND_VELOCITY` range check (confirmed: it did, in the found case).
+
+**Validate against real data, always, before trusting a threshold you
+haven't run against anything but the cookbook's own worked examples.**
+
+## Open questions
+
+- Whether the 2022 edition (v2.1) retired or consolidated any of the 1994
+  edition's ~30 flag categories (Appendix A), and whether it revises either
+  numeric threshold used above (3.7 m, 0.2°C) — unresolved as of this
+  writing; a question is out to one of the 2022 edition's co-authors.
+- "Wire Stretch" and the multi-point "severe spiking... over a wide range
+  of depths" case (v1.1 section 3.3, Reject code SPR) are both real,
+  found-in-practice fault shapes with no automated check yet — see
+  [What we tried and rejected](#what-we-tried-and-rejected).
+
+## References
+
+- Bailey, R., Gronell, A., Phillips, H., Tanner, E. & Meyers, G. (1994).
+  *Quality Control Cookbook for XBT Data*, CSIRO Marine Laboratories
+  Report 221, v1.1.
+- Cowley, R. & Krummel, S. (2022). *Australian XBT Quality Control
+  Cookbook*, v2.1, CSIRO.
+- IMOS NetCDF Conventions, v1.4 (July 2015) — the ancillary
+  `<PARAM>_quality_control` variable convention this pipeline's output
+  follows.

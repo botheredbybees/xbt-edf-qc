@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xbt-edf-qc"
+version = "0.1.0"
+description = "Parses Sippican/Lockheed Martin MK21 XBT EDF cast files, applies CSIRO XBT QC Cookbook checks, and builds CF-1.6/IMOS-1.4 profile NetCDF files."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "xarray>=2023.1",
+    "netCDF4>=1.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/botheredbybees/xbt-edf-qc"
+
+[tool.setuptools]
+py-modules = ["parse_xbt_edf", "build_xbt_netcdf"]
