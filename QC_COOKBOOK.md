@@ -12,6 +12,30 @@ findings. Treat it as a design record, not a spec handed down from the
 cookbooks themselves — where this pipeline's behaviour differs from a
 literal reading of either cookbook, that's called out explicitly below.
 
+**If you're an agent extending or reimplementing this pipeline**, the
+[Checks at a glance](#checks-at-a-glance) and [Constants
+reference](#constants-reference) tables below are the fast path — each row
+links to the prose section with the full cookbook citation and reasoning.
+Read [What we tried and rejected](#what-we-tried-and-rejected) before
+adding or loosening any threshold: every rejection there was found by
+running against real data, not by inspection.
+
+## Contents
+
+- [The two source documents](#the-two-source-documents)
+- [Checks at a glance](#checks-at-a-glance)
+- [Checks implemented](#checks-implemented)
+  - [Test Probe detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else)
+  - [Surface Spikes — CS](#surface-spikes--cs-v11-section-21)
+  - [Isolated readings with no real neighbours — SP](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes)
+  - [Speed check — PE / TE](#speed-check--pe--te-v11-section-424425)
+  - [Probe-type check — PR](#probe-type-check--pr-v11-section-426)
+  - [Physical-plausibility range check — RC](#physical-plausibility-range-check--rc)
+- [Constants reference](#constants-reference)
+- [What we tried and rejected](#what-we-tried-and-rejected)
+- [Open questions](#open-questions)
+- [References](#references)
+
 ## The two source documents
 
 | | Edition | Authors | What it's cited for here |
@@ -25,13 +49,35 @@ while these checks were built. If you have the 2022 edition and its
 thresholds differ from what's below, that's worth resolving — see
 [Open questions](#open-questions).
 
-## Checks implemented
+## Checks at a glance
 
 Every check below only **flags** — none of them correct, interpolate, or
 delete a value. `HISTORY_PREVIOUS_VALUE` is always the fill for exactly this
 reason: these checks never have a genuine "previous value" to report.
+"Applies to" is which casts reach the check at all; "Appendix F bit" is
+whether it's visible in the `XBT_fault_and_feature_flag_type` bitmask on its
+own, independent of `HISTORY_QC_FLAG`.
+
+| Code | Check | Applies to | Effect | Appendix F bit | Status |
+|---|---|---|---|---|---|
+| — | [Test Probe detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else) | All casts | Excludes self-test casts from output | `FAULT_TEST_PROBE` | ✅ Implemented (gate) |
+| TP | ↳ failed self-test | Self-test casts only | Warning logged, not a QC flag | `FAULT_TEST_PROBE` | ✅ Implemented |
+| CS (Accept / CSA) | [Surface Spikes](#surface-spikes--cs-v11-section-21) | Real casts | TEMP → missing above 3.7 m | none | ✅ Implemented |
+| CS (Reject / CSR) | ↳ transient below 3.7 m | — | — | — | ❌ Not implemented — needs operator judgement |
+| SP | [Isolated readings](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes) (zero real neighbours) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (narrowed scope) |
+| — | ↳ full neighbour-average "Spikes" formula | — | — | — | 🔬 Tried, rejected (97 false positives on real data — [details](#what-we-tried-and-rejected)) |
+| PE + TE | [Speed check](#speed-check--pe--te-v11-section-424425) | Real casts, vs. previous real cast | LATITUDE/LONGITUDE/TIME/TEMP → probably bad, both codes together | `FAULT_POSITION_ERROR` + `FAULT_TIME_ERROR` | ✅ Implemented (both emitted, can't disambiguate) |
+| PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
+| RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented |
+| — | Wire Stretch (§4.4/4.5) | — | — | — | ❌ Not automated — usually still caught indirectly via `SOUND_VELOCITY` RC ([details](#what-we-tried-and-rejected)) |
+| SPR | Severe multi-point spiking (§3.3) | — | — | — | ❌ Not implemented — see [Open questions](#open-questions) |
+
+## Checks implemented
 
 ### Test Probe detection (not a per-point check, but gates everything else)
+
+**Status:** Implemented. Runs first; determines whether every check below
+even applies to a given cast.
 
 A self-test cast (the recorder's own built-in calibration check, not a real
 deployed probe) is identified by *any* of: "test" (case-insensitive) in the
@@ -52,6 +98,8 @@ somewhere other than a QC flag nobody downstream will ever read.
 
 ### Surface Spikes — CS (v1.1 section 2.1)
 
+**Status:** Implemented — Accept (CSA) case only.
+
 > "Surface spikes are caused by a minor start-up transient problem that
 > leads to inaccurate temperature measurements in the top few metres... The
 > CSA flag is applied to all XBT profiles in which the surface spike is
@@ -64,20 +112,27 @@ Applied unconditionally to every real (non-test-probe) cast: TEMP above
 judgement call — the cookbook's own framing is that this is universal
 housekeeping, not a defect being flagged.
 
-**Not implemented:** the Reject variant (CSR — the transient detected
-*below* 3.7 m and judged to actually affect the data). Distinguishing that
-from real near-surface thermal structure needs the same kind of operator
+#### Not implemented: CSR (Reject variant)
+
+The Reject variant (CSR — the transient detected *below* 3.7 m and judged
+to actually affect the data) isn't implemented. Distinguishing that from
+real near-surface thermal structure needs the same kind of operator
 judgement call the cookbook itself requires to disambiguate PE from TE
 (next section) — this pipeline doesn't have that input.
 
-### Isolated readings with no real neighbours — SP (v1.1 sections 3.2 "Wire
-Break" and 3.3 "Spikes")
+### Isolated readings with no real neighbours — SP (v1.1 sections 3.2 "Wire Break" and 3.3 "Spikes")
+
+**Status:** Implemented — narrowed scope (zero-real-neighbours case only).
 
 A real TEMP value is flagged if **both** immediate neighbours (one
 shallower, one deeper) are missing. This is the shape of a wire-break or
 end-of-cast fault: "a short circuit causes the temperature readings to go
 off scale" (section 3.2), leaving a stray reading that survived alone past
-the point the rest of the cast had already failed.
+the point the rest of the cast had already failed. Applied to every cast,
+real or test-probe, same as the [range check](#physical-plausibility-range-check--rc)
+below.
+
+#### Not implemented: full neighbour-average "Spikes" formula
 
 **This is narrower than a literal reading of section 3.3.** The cookbook
 describes "Spikes" as any isolated deviation from *real* neighbours, with
@@ -89,6 +144,9 @@ see [What we tried and rejected](#what-we-tried-and-rejected) below. Only
 the zero-real-neighbours case ships.
 
 ### Speed check — PE / TE (v1.1 section 4.2.4/4.2.5)
+
+**Status:** Implemented — both codes emitted together, deliberately not
+disambiguated.
 
 Implausible ship speed (>25 knots, `MAX_PLAUSIBLE_SPEED_KNOTS`) implied
 between two consecutive real casts' positions and launch times. The
@@ -104,6 +162,8 @@ downgraded from the surface, DEPTH left alone (Table 2).
 
 ### Probe-type check — PR (v1.1 section 4.2.6)
 
+**Status:** Implemented.
+
 The EDF header's Probe Type field checked against the ship's actual stocked
 probes. An unrecognised value downgrades TEMP *and* DEPTH from the surface
 — DEPTH too, because depth is derived from the probe-specific fall-rate
@@ -111,6 +171,10 @@ equation, so a wrong probe type invalidates the whole depth axis, not just
 the indexed temperatures (cites Cheng et al. 2016).
 
 ### Physical-plausibility range check — RC
+
+**Status:** Implemented — the one check with no direct cookbook section of
+its own; it enforces attributes both cookbooks assume readers already
+validate.
 
 Every published variable's own declared `valid_min`/`valid_max` enforced
 against its *real* data, per-point for the depth-indexed variables (TEMP,
@@ -123,14 +187,30 @@ found LATITUDE/LONGITUDE had the same gap (declared but unenforced), and
 DEPTH/SOUND_VELOCITY had no declared range at all. All four `_VALID_MIN`/
 `_VALID_MAX` constants are the *single* source of truth for both the
 NetCDF attribute and this check, specifically so metadata and enforcement
-can't drift apart again.
+can't drift apart again — see [Constants reference](#constants-reference)
+for the exact values and where each comes from.
 
-`TEMP_VALID_MIN`/`MAX` (-2.5/40.0°C) are the cookbook/GTSPP convention.
-`DEPTH_VALID_MAX` (2500 m) is the MK21 ISA manual's deepest-rated
-ship-stocked probe (T-5, 1830 m) plus margin — not a guess.
-`SOUND_VELOCITY_VALID_MIN`/`MAX` (1400/1560 m/s) is a pragmatic engineering
-bound, validated against real historical data before trusting it (see
-below) rather than invented.
+## Constants reference
+
+Every threshold used above, with its exact value and where it comes from.
+Defined once in `parse_xbt_edf.py` and imported everywhere else — this
+table exists so a change to a threshold and a change to this document can
+be checked against each other without reading the source.
+
+| Constant | Value | Used by | Source |
+|---|---|---|---|
+| `TEST_PROBE_ISOTHERMAL_CENTER_C` | 1.5°C | Test Probe detection | Cookbook signature, v1.1 §2.2 |
+| `TEST_PROBE_ISOTHERMAL_TOLERANCE_C` | ±0.15°C | Test Probe detection | Cookbook signature, v1.1 §2.2 |
+| `TEST_PROBE_ISOTHERMAL_MIN_FRACTION` | 0.5 (half the cast) | Test Probe detection | Cookbook signature, v1.1 §2.2 |
+| `TEST_PROBE_MAX_TEMPERATURE_VARIATION_C` | 0.005°C | Failed self-test warning (TP) | Cookbook, v1.1 §2.2 |
+| `SURFACE_SPIKE_DEPTH_M` | 3.7 m | Surface Spikes (CS) | Cookbook, v1.1 §2.1 |
+| `MAX_PLAUSIBLE_SPEED_KNOTS` | 25.0 kn | Speed check (PE/TE) | Cookbook, v1.1 §4.2.4/4.2.5 |
+| `TEMP_VALID_MIN` / `TEMP_VALID_MAX` | −2.5°C / 40.0°C | Range check (RC) | Cookbook/GTSPP convention |
+| `LATITUDE_VALID_MIN` / `_MAX` | −90° / 90° | Range check (RC) | Physical bound |
+| `LONGITUDE_VALID_MIN` / `_MAX` | −180° / 180° | Range check (RC) | Physical bound |
+| `DEPTH_VALID_MIN` | −1.0 m | Range check (RC) | Small negative slop for near-surface sensor/calibration noise |
+| `DEPTH_VALID_MAX` | 2500.0 m | Range check (RC) | MK21 ISA manual's deepest-rated ship-stocked probe (T-5, 1830 m) plus margin — not a guess |
+| `SOUND_VELOCITY_VALID_MIN` / `_MAX` | 1400 / 1560 m/s | Range check (RC) | Pragmatic engineering bound, validated against real historical data (see [below](#what-we-tried-and-rejected)) rather than invented |
 
 ## What we tried and rejected
 
