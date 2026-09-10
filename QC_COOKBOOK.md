@@ -68,7 +68,7 @@ own, independent of `HISTORY_QC_FLAG`.
 | CS (Reject / CSR) | ↳ transient below 3.7 m | — | — | — | ❌ Not implemented — needs operator judgement |
 | SP | [Isolated readings](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes) (zero real neighbours) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (narrowed scope) |
 | WB | [Wire Break cascade](#wire-break-cascade--wb-v11-section-32) (unrecovered NaN run at cast end) | All casts, incl. self-test | Audit trail only — no `_qc` change | none | ✅ Implemented |
-| SP | ↳ [full neighbour-average "Spikes" formula, at GTSPP's 2.0°C](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (retried at GTSPP's threshold, not the cookbook's 0.2°C — [details](#what-we-tried-and-rejected)) |
+| SP | ↳ [neighbour-average "Spikes" formula, at GTSPP's 2.0°C threshold](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented — simplified formula, deliberately not GTSPP's literal two-term one (NDO-727, [details](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)) |
 | PE + TE | [Speed check](#speed-check--pe--te-v11-section-424425) | Real casts, vs. previous real cast | LATITUDE/LONGITUDE/TIME/TEMP → probably bad, both codes together | `FAULT_POSITION_ERROR` + `FAULT_TIME_ERROR` | ✅ Implemented (both emitted, can't disambiguate) |
 | PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
 | RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 1500 m — [details](#physical-plausibility-range-check--rc)) |
@@ -191,7 +191,10 @@ the test, which nothing about the raw EDF file itself can tell you.
 ### Neighbour-average Spikes retest — SP (v1.1 section 3.3 / GTSPP Real-Time QC Manual)
 
 **Status:** Implemented, at GTSPP's 2.0°C threshold rather than the
-cookbook's own 0.2°C.
+cookbook's own 0.2°C — and deliberately using a simplified version of
+GTSPP's formula, not the literal one. Read this whole section before
+"fixing" the formula to match GTSPP exactly; NDO-727 investigated doing
+exactly that and found it would be a real regression, not a correction.
 
 The full formula section 3.3 actually describes: average a point's two real
 immediate neighbours, flag it if it deviates from that average by more than
@@ -206,14 +209,46 @@ archive at 2.0°C, it flagged **190 samples across 112 of 369 profiles**,
 with **zero apparent false positives** on inspection — every flagged point
 sits at the edge of a sharp, fault-shaped ramp (tens of degrees over one or
 two samples), not the sub-1°C step structure that sank the 0.2°C attempt.
-As a side effect, this formula also catches the "Wire Stretch" fault shape
-(below) at any point along a steep-enough ramp, since each such point
-deviates from its neighbours' average too — not by design, but confirmed
-useful in practice. Applied to every cast, real or test-probe, same as
-every other physical-plausibility check; additive to (not a replacement
-for) the zero-real-neighbours case above — that case still catches
-genuinely isolated readings this formula can't evaluate (it needs two
-*real* neighbours).
+
+**What's actually shipped is `|V2 - avg(V1,V3)| > threshold`** —
+GTSPP's own manual (IOC M&G No. 22, §2.7) specifies a more sophisticated
+two-term formula, `|V2 - avg(V1,V3)| - |V1-V3|/2 > threshold`, where the
+second term discounts the neighbours' *own* spread so a point sitting on a
+real, steep gradient isn't penalised just for differing from its
+neighbours' average. NDO-727 was filed to bring the shipped formula in
+line with that literal text. **Investigated before implementing (per this
+document's own real-data discipline) — and the literal fix was rejected**:
+run against the real historical archive, the correct two-term formula
+flags only **5** of the current 190 samples. The other 185 aren't false
+positives being fixed; they're mostly points on a **smooth, near-linear
+ramp** — the exact "Wire Stretch" fault shape below — which the two-term
+formula is specifically designed *not* to flag (that's precisely what its
+correction term does: tolerate a real, steep, but locally-linear
+gradient). Checking further: of the fault-onset values behind those 185
+flags, **65 would never be flagged by any check at all** under the
+corrected formula — not in the window that currently (accidentally)
+catches them, and not later either, since GTSPP's own formula is not
+designed to catch a ramp shape by construction, only a true point spike.
+
+**So the shipped formula's simplification is load-bearing, not a bug.**
+It's doing two jobs GTSPP's own manual splits into two separate,
+unautomated checks here: the genuine point-spike test (§3.3, what GTSPP's
+formula is actually for) and Wire Stretch ramp detection (§4.4/4.5, listed
+below as a real, found-in-practice, never-automated fault shape). The
+simplified formula catches both as one side effect; the literal GTSPP
+formula would only do the first, silently dropping the second. NDO-727 is
+closed as won't-fix on that basis — implementing GTSPP's formula exactly
+would trade a spec-compliance win for a real loss of fault detection. If
+Wire Stretch ever gets its own dedicated, real-data-validated check (see
+[Open questions](#open-questions)), *then* revisit whether the spike test
+should switch to GTSPP's literal formula, since the ramp-catching side
+effect would no longer be the only thing catching those faults.
+
+Applied to every cast, real or test-probe, same as every other
+physical-plausibility check; additive to (not a replacement for) the
+zero-real-neighbours case above — that case still catches genuinely
+isolated readings this formula can't evaluate (it needs two *real*
+neighbours).
 
 ### Speed check — PE / TE (v1.1 section 4.2.4/4.2.5)
 
@@ -387,7 +422,14 @@ conservative... only those features that have been confirmed... are
 flagged as real." A cast with this fault shape isn't left completely
 unflagged in practice, though — `SOUND_VELOCITY` is computed from the same
 corrupted temperature, so it usually still trips the existing
-`SOUND_VELOCITY` range check (confirmed: it did, in the found case).
+`SOUND_VELOCITY` range check (confirmed: it did, in the found case). TEMP
+itself also usually catches it, but only by accident: NDO-727 confirmed
+the shipped neighbour-average spike check's simplified formula is what
+does that (see [above](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual))
+— the literal GTSPP formula it was checked against leaves 65 of the real
+archive's fault-onset points uncaught by any TEMP check at all, since it's
+specifically designed not to flag a smooth real-looking gradient, which is
+exactly what a wire-stretch ramp looks like locally.
 
 **Validate against real data, always, before trusting a threshold you
 haven't run against anything but the cookbook's own worked examples.**
@@ -407,8 +449,13 @@ haven't run against anything but the cookbook's own worked examples.**
   found-in-practice fault shapes with no *dedicated* automated check yet —
   see [What we tried and rejected](#what-we-tried-and-rejected). The
   neighbour-average spike retest (above) catches wire-stretch as a side
-  effect at any point along a steep-enough ramp, but that's incidental,
-  not a purpose-built detector for the shape as a whole.
+  effect at any point along a steep-enough ramp, but that's incidental, not
+  a purpose-built detector for the shape as a whole — and NDO-727 confirmed
+  it's load-bearing, not just incidental: closed as won't-fix rather than
+  "corrected" to GTSPP's literal formula, specifically because that literal
+  formula stops catching this shape. If Wire Stretch ever gets its own
+  dedicated check, revisit whether the spike test should switch to GTSPP's
+  literal formula at that point.
 
 ## References
 

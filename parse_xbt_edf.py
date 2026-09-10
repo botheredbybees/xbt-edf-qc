@@ -726,14 +726,26 @@ def _flag_spikes(qc: CastQC, now: datetime) -> None:
 
 def _flag_neighbour_average_spikes(qc: CastQC, now: datetime) -> None:
     """Flags a real TEMP value that deviates from the average of its two
-    real immediate neighbours by more than SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C
-    (the standard 3-point spike-test formula, GTSPP Real-Time QC Manual,
-    IOC M&G No. 22). Additive to _flag_spikes (which only catches a reading
-    with NO real data on either side) -- this catches a reading with real,
-    but very different, neighbours instead. See
-    SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C's own comment for the real-data
-    validation behind this specific threshold. Applied to every cast, real
-    or test-probe, same as every other physical-plausibility check."""
+    real immediate neighbours by more than SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C.
+    Deliberately a SIMPLIFIED version of GTSPP Real-Time QC Manual (IOC M&G
+    No. 22, section 2.7)'s own formula, which is actually a two-term
+    |V2-avg(V1,V3)| - |V1-V3|/2 > threshold -- the second term discounts the
+    neighbours' own spread so a point on a real, steep gradient isn't
+    penalised. NDO-727 investigated switching to that literal formula and
+    found it would be a real regression, not a fix: on the real historical
+    archive it drops 185 of the current 190 flags, and 65 of the underlying
+    fault-onset points go uncaught by ANY check as a result, because most
+    of what this simplified formula catches is actually the "Wire Stretch"
+    ramp fault shape (QC_COOKBOOK.md section 4.4/4.5), not a genuine point
+    spike -- exactly the shape the literal formula's correction term is
+    designed to NOT flag. See QC_COOKBOOK.md's "Neighbour-average Spikes
+    retest" section for the full investigation before changing this
+    formula. Additive to _flag_spikes (which only catches a reading with NO
+    real data on either side) -- this catches a reading with real, but very
+    different, neighbours instead. See SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C's
+    own comment for the real-data validation behind this specific
+    threshold. Applied to every cast, real or test-probe, same as every
+    other physical-plausibility check."""
     temp = qc.cast.temperature_c
     n = temp.size
     if n < 3:
