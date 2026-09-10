@@ -96,7 +96,7 @@ def test_history_variables_populated_for_a_flagged_cast():
     second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
     casts_qc = apply_qc([first, second])
     ds = build_xbt_netcdf(casts_qc)
-    assert ds.dims["N_HISTORY"] == 12
+    assert ds.dims["N_HISTORY"] == 13
     assert ds["HISTORY_QC_FLAG"].values[1, 0] == "PE"
     assert ds["HISTORY_QC_FLAG"].values[1, 1] == "TE"
     assert ds["HISTORY_PARAMETER"].values[1, 0] == "LATITUDE,LONGITUDE"
@@ -117,21 +117,25 @@ def test_history_previous_value_is_always_the_fill():
 
 
 def test_n_history_capacity_covers_the_worst_case_cast():
-    # This specific fixture still produces exactly 10 real entries: CS from
+    # This specific fixture produces exactly 11 real entries: CS from
     # the surface-spike check (fires here because depth_m includes points
     # below 3.7 m), PE + TE from the speed check, PR from the probe-type
     # check, RC once each for TEMP, DEPTH, SOUND_VELOCITY, LATITUDE and
-    # LONGITUDE all independently out of range, and SP from the
-    # isolated-spike check -- CS's masking leaves the 999.0 reading
-    # stranded between two NaNs, which the isolated-spike check flags as
-    # uncorroborated on its own (and which the neighbour-average spike
-    # check, added since NDO-708, does NOT also flag -- it needs two real
-    # neighbours to compute an average from, and both of this reading's
-    # neighbours are NaN after CS). _N_HISTORY itself is 12 (not 10), for
-    # headroom covering the true theoretical worst case across all checks
-    # (e.g. a cast whose TEMP goes out of range in both depth bands AND
-    # triggers both spike checks) -- this fixture doesn't hit that
-    # ceiling, so the two trailing slots are the fixed-width array's own
+    # LONGITUDE all independently out of range, SP from the isolated-spike
+    # check -- CS's masking leaves the 999.0 reading stranded between two
+    # NaNs, which the isolated-spike check flags as uncorroborated on its
+    # own (and which the neighbour-average spike check, added since
+    # NDO-708, does NOT also flag -- it needs two real neighbours to
+    # compute an average from, and both of this reading's neighbours are
+    # NaN after CS) -- and WB from the Wire Break cascade check (added
+    # since NDO-728): CS's masking also leaves the cast's own last sample
+    # (depth 2.0 m, below the 3.7 m surface-spike depth) as an unrecovered
+    # trailing NaN, which is exactly the shape WB looks for. _N_HISTORY
+    # itself is 13 (not 11), for headroom covering the true theoretical
+    # worst case across all checks (e.g. a cast whose TEMP goes out of
+    # range in both depth bands AND triggers both spike checks AND ends
+    # in an unrecovered NaN run) -- this fixture doesn't hit that ceiling,
+    # so the two trailing slots are the fixed-width array's own
     # empty-string padding, not a missing finding.
     first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
     second = _cast(
@@ -143,7 +147,7 @@ def test_n_history_capacity_covers_the_worst_case_cast():
     )
     ds = build_xbt_netcdf(apply_qc([first, second]))
     assert list(ds["HISTORY_QC_FLAG"].values[1]) == [
-        "CS", "PE", "TE", "PR", "RC", "SP", "RC", "RC", "RC", "RC", "", "",
+        "CS", "PE", "TE", "PR", "RC", "SP", "WB", "RC", "RC", "RC", "RC", "", "",
     ]
 
 

@@ -765,8 +765,49 @@ def _flag_neighbour_average_spikes(qc: CastQC, now: datetime) -> None:
     ))
 
 
+def _flag_wire_break_cascade(qc: CastQC, now: datetime) -> None:
+    """Flags a cast whose TEMP record ends in an unrecovered run of NaN
+    samples -- the automated form of the cookbook's own Wire Break check
+    (v1.1 section 3.2): "a short circuit causes the temperature readings to
+    go off scale... downgrade data to Class 4 from depth of initial point of
+    damage." Audit-trail only: every NaN sample already becomes
+    GTSPP_MISSING via CastQC.__post_init__, before any check runs, so this
+    doesn't change temperature_qc -- it documents WHY the tail is missing.
+    Deliberately narrower than a literal reading of Alison Herbert's original
+    suggestion ("as soon as there's a -99, discard the rest of the cast") --
+    see this check's own design spec for the real-data investigation that
+    found her literal wording would discard most of some real casts over a
+    single mid-cast dropout the instrument evidently recovered from. Applied
+    to every cast, real or test-probe, matching every other
+    physical-plausibility check in apply_qc()."""
+    temp = qc.cast.temperature_c
+    n = temp.size
+    if n == 0 or not np.isnan(temp[-1]):
+        return
+    end = n
+    start = n - 1
+    while start > 0 and np.isnan(temp[start - 1]):
+        start -= 1
+    depth = qc.cast.depth_m
+    run_depths = depth[start:end]
+    valid_run_depths = run_depths[~np.isnan(run_depths)]
+    qc.history.append(HistoryEntry(
+        institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+        software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+        start_depth=float(np.min(valid_run_depths)) if valid_run_depths.size else 0.0,
+        stop_depth=float(np.max(valid_run_depths)) if valid_run_depths.size else 0.0,
+        qc_flag="WB",
+        qc_flag_description=(
+            f"{end - start} TEMP sample(s) ending the cast with no recovery -- "
+            "Wire Break signature (CSIRO XBT QC Cookbook v1.1 section 3.2)"
+        ),
+    ))
+
+
 def apply_qc(casts: list) -> list:
-    """Applies the 5 automated QC checks to a voyage's casts.
+    """Applies every automated QC check to a voyage's casts (see
+    QC_COOKBOOK.md for the full list -- not repeated here as a count, since
+    that number has gone stale in this exact docstring before).
 
     Args:
         casts: every cast for one voyage (TestProbe casts included -- the
@@ -775,19 +816,22 @@ def apply_qc(casts: list) -> list:
     Returns:
         One CastQC per input cast, sorted into launch_time order.
 
-    A cast can accumulate at most 12 history entries: the surface-spike
+    A cast can accumulate at most 13 history entries: the surface-spike
     check emits 1 (CS), the speed check 2 (PE and TE, which cannot be told
     apart automatically), the probe-type check 1, the isolated-spike check 1
     (SP), the neighbour-average spike check 1 more (SP -- a second, distinct
     entry, since a cast can trigger both the isolated and the
-    neighbour-average check independently), and the physical-plausibility
-    range check up to 6 more (RC -- TEMP alone can now produce 2 entries,
-    one per depth band, plus DEPTH, SOUND_VELOCITY, LATITUDE, LONGITUDE each
-    independently, so worst case 6 RC entries on the same cast). A test
-    probe cast never reaches the surface-spike check (see
+    neighbour-average check independently), the Wire Break cascade check 1
+    (WB), and the physical-plausibility range check up to 6 more (RC --
+    TEMP alone can now produce 2 entries, one per depth band, plus DEPTH,
+    SOUND_VELOCITY, LATITUDE, LONGITUDE each independently, so worst case 6
+    RC entries on the same cast). None of these are mutually exclusive --
+    each fires from a different part of the profile or a different
+    variable, so a sufficiently pathological real cast can trigger all 13
+    at once. A test probe cast never reaches the surface-spike check (see
     _remove_surface_spike's docstring) or the first two, and emits at most
-    9 (TP + both SP checks + up to 6 RC). Keep build_xbt_netcdf._N_HISTORY
-    at or above that ceiling.
+    10 (TP + both SP checks + WB + up to 6 RC). Keep
+    build_xbt_netcdf._N_HISTORY at or above that ceiling.
     """
     ordered = sorted(casts, key=lambda cast: cast.launch_time)
     now = datetime.utcnow()
@@ -926,6 +970,7 @@ def apply_qc(casts: list) -> list:
         _flag_temperature_out_of_depth_band_range(qc, now)
         _flag_spikes(qc, now)
         _flag_neighbour_average_spikes(qc, now)
+        _flag_wire_break_cascade(qc, now)
         _flag_array_out_of_range(qc, qc.depth_qc, cast.depth_m,
                                   DEPTH_VALID_MIN, DEPTH_VALID_MAX, "DEPTH", "m", now)
         _flag_array_out_of_range(qc, qc.sound_velocity_qc, cast.sound_velocity_ms,

@@ -32,15 +32,23 @@ _QC_FLAG_MEANINGS = (
 )
 _QC_FILL_VALUE = 99
 
-# A cast can trigger at most 10 QC history entries: the surface-spike check
-# emits 1 (CS), the speed check emits 2 (PE and TE -- an automated check
-# cannot tell a position error from a time error), the probe-type check 1,
-# the isolated-spike check 1 (SP), and the physical-plausibility range check
-# up to 5 more (RC on TEMP, DEPTH, SOUND_VELOCITY, LATITUDE, LONGITUDE --
-# each is independent, so worst case all 5 fire on the same cast). A test
-# probe cast reaches none of the first two nor the surface-spike check, and
-# emits at most 7 (TP + SP + up to 5 RC). See parse_xbt_edf.apply_qc.
-_N_HISTORY = 12
+# A real cast can trigger at most 13 QC history entries: the surface-spike
+# check emits 1 (CS), the speed check emits 2 (PE and TE -- an automated
+# check cannot tell a position error from a time error), the probe-type
+# check 1, the isolated-spike check 1 (SP), the neighbour-average spike
+# check 1 more (SP -- a second, distinct entry, since a cast can trigger
+# both the isolated and the neighbour-average check independently), the
+# Wire Break cascade check 1 (WB), and the physical-plausibility range
+# check up to 6 more (RC -- TEMP alone can produce 2 entries, one per depth
+# band, plus DEPTH, SOUND_VELOCITY, LATITUDE and LONGITUDE each
+# independently, so worst case 6 RC entries on the same cast). None of
+# these 13 triggers are mutually exclusive: each fires from a different
+# part of the profile or a different variable, so a sufficiently
+# pathological real cast can trigger all of them at once. A test probe
+# cast never reaches the surface-spike check or the first two, and emits
+# at most 10 (TP + both SP checks + WB + up to 6 RC). See
+# parse_xbt_edf.apply_qc.
+_N_HISTORY = 13
 
 # Australian XBT Quality Control Cookbook v2.1 (Cowley & Krummel, CSIRO 2022),
 # Appendix F pp.86-87.

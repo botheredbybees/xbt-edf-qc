@@ -750,3 +750,67 @@ def test_neighbour_average_spike_check_also_applies_to_test_probe_casts():
     )
     [qc] = apply_qc([cast])
     assert qc.temperature_qc[1] == GTSPP_PROBABLY_BAD
+
+
+def test_temperature_ending_in_unrecovered_nan_run_gets_a_wb_entry():
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0, 13.0]),
+        temperature_c=np.array([10.0, 10.0, np.nan, np.nan]),
+    )
+    [qc] = apply_qc([cast])
+    wb_entries = [h for h in qc.history if h.qc_flag == "WB"]
+    assert len(wb_entries) == 1
+    assert wb_entries[0].start_depth == 12.0
+    assert wb_entries[0].stop_depth == 13.0
+    assert "section 3.2" in wb_entries[0].qc_flag_description
+
+
+def test_temperature_nan_run_that_recovers_before_the_end_gets_no_wb_entry():
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0, 13.0]),
+        temperature_c=np.array([10.0, np.nan, np.nan, 10.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert "WB" not in [h.qc_flag for h in qc.history]
+
+
+def test_temperature_with_no_nan_at_all_gets_no_wb_entry():
+    cast = _cast(temperature_c=np.array([10.0, 10.0, 10.0]))
+    [qc] = apply_qc([cast])
+    assert "WB" not in [h.qc_flag for h in qc.history]
+
+
+def test_temperature_ending_in_a_single_nan_sample_still_gets_a_wb_entry():
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([10.0, 10.0, np.nan]),
+    )
+    [qc] = apply_qc([cast])
+    wb_entries = [h for h in qc.history if h.qc_flag == "WB"]
+    assert len(wb_entries) == 1
+    assert wb_entries[0].start_depth == 12.0
+    assert wb_entries[0].stop_depth == 12.0
+
+
+def test_temperature_with_a_recovering_run_and_a_terminal_run_gets_one_wb_entry():
+    # The recovering run (indices 1-2) must NOT produce its own WB entry --
+    # only the terminal run (index 5) should.
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0]),
+        temperature_c=np.array([10.0, np.nan, np.nan, 10.0, 10.0, np.nan]),
+    )
+    [qc] = apply_qc([cast])
+    wb_entries = [h for h in qc.history if h.qc_flag == "WB"]
+    assert len(wb_entries) == 1
+    assert wb_entries[0].start_depth == 15.0
+    assert wb_entries[0].stop_depth == 15.0
+
+
+def test_wire_break_cascade_check_also_runs_on_test_probe_casts():
+    cast = _cast(
+        serial_number="TestProbe",
+        depth_m=np.array([1.0, 2.0, 3.0]),
+        temperature_c=np.array([1.5, 1.5, np.nan]),
+    )
+    [qc] = apply_qc([cast])
+    assert "WB" in [h.qc_flag for h in qc.history]
