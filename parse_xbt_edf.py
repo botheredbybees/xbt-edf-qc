@@ -275,6 +275,39 @@ DEPTH_VALID_MAX = 2500.0  # deepest ship-stocked probe (T-5, 1830 m rated) plus 
 SOUND_VELOCITY_VALID_MIN = 1400.0
 SOUND_VELOCITY_VALID_MAX = 1560.0
 
+# GTSPP Real-Time QC Manual (IOC M&G No. 22), Section 2.4 "Profile
+# Envelope": temperature's valid range should tighten with depth, not stay
+# one flat bound for the whole cast. Validated against the real 369-profile
+# historical archive before trusting a specific depth/bound pair
+# (2026-09-10, docs/superpowers/specs/2026-09-10-xbt-depth-band-and-spike-
+# retest-design.md): at depths >=1500 m there is a clean, wide gap in real
+# TEMP values -- nothing above 16.92 degC, then nothing again until 32.04
+# degC (the same already-known fault signature this file's SOUND_VELOCITY
+# bound and isolated-spike check both independently confirm). Shallower
+# depths show NO clean gap -- real regional fronts/eddies (confirmed by
+# hand: a genuine, smooth 12.12->16.1 degC rise over 7 m at ~730 m depth)
+# sit on a continuum with the same fault values all the way up to 37 degC,
+# so TEMP_VALID_MIN/TEMP_VALID_MAX (unchanged) remain the only defensible
+# bound there. Only the upper bound tightens at depth -- nothing in the
+# real-data investigation suggested the lower bound needs to differ by
+# depth.
+TEMP_DEEP_BAND_DEPTH_M = 1500.0
+TEMP_DEEP_VALID_MAX = 20.0
+
+# GTSPP Real-Time QC Manual (IOC M&G No. 22)'s own spike-test threshold --
+# 10x looser than the CSIRO cookbook's 0.2 degC, which this pipeline
+# already tried and rejected for 97 false positives on real fine-scale
+# ocean structure (see QC_COOKBOOK.md's "What we tried and rejected").
+# Validated against the full 369-profile historical archive before
+# trusting it (2026-09-10, docs/superpowers/specs/2026-09-10-xbt-depth-
+# band-and-spike-retest-design.md): 190 point-flags across 112 profiles,
+# zero apparent false positives on real structure -- every flagged point
+# is either a genuine isolated spike or a physically-impossible smooth
+# ramp (the "wire-stretch" fault class this file already documents as
+# found-but-not-automated, caught here as a side effect of the same
+# formula).
+SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C = 2.0
+
 # CSIRO Marine Laboratories Report 221, "Quality Control Cookbook for XBT
 # Data" v1.1 (Bailey, Gronell, Phillips, Tanner & Meyers, 1994), section 2.1
 # "Surface Spikes (CS)": "Surface spikes are caused by a minor start-up
@@ -603,6 +636,55 @@ def _remove_surface_spike(cast: Cast) -> None:
     cast.temperature_c[shallow] = np.nan
 
 
+def _flag_temperature_out_of_depth_band_range(qc: CastQC, now: datetime) -> None:
+    """Depth-banded version of TEMP's physical-plausibility range check --
+    see TEMP_DEEP_VALID_MAX's own module-level comment for the real-data
+    validation behind the specific depth/bound chosen. Replaces the plain
+    _flag_array_out_of_range(..., TEMP_VALID_MIN, TEMP_VALID_MAX, "TEMP",
+    ...) call in apply_qc() -- this IS TEMP's range check now, not an
+    addition alongside it. DEPTH_VALUES/SOUND_VELOCITY are unaffected,
+    still handled by the shared, non-banded _flag_array_out_of_range."""
+    temp = qc.cast.temperature_c
+    depth = qc.cast.depth_m
+    shallow = depth < TEMP_DEEP_BAND_DEPTH_M
+    deep = ~shallow
+
+    shallow_bad = shallow & ((temp < TEMP_VALID_MIN) | (temp > TEMP_VALID_MAX))
+    deep_bad = deep & ((temp < TEMP_VALID_MIN) | (temp > TEMP_DEEP_VALID_MAX))
+
+    if np.any(shallow_bad):
+        qc.temperature_qc[shallow_bad] = GTSPP_PROBABLY_BAD
+        bad_depths = depth[shallow_bad]
+        valid_bad_depths = bad_depths[~np.isnan(bad_depths)]
+        qc.history.append(HistoryEntry(
+            institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+            software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+            start_depth=float(np.min(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+            stop_depth=float(np.max(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+            qc_flag="RC",
+            qc_flag_description=(
+                f"{int(np.sum(shallow_bad))} TEMP sample(s) outside valid range "
+                f"[{TEMP_VALID_MIN}, {TEMP_VALID_MAX}] degC (depth < {TEMP_DEEP_BAND_DEPTH_M} m)"
+            ),
+        ))
+
+    if np.any(deep_bad):
+        qc.temperature_qc[deep_bad] = GTSPP_PROBABLY_BAD
+        bad_depths = depth[deep_bad]
+        valid_bad_depths = bad_depths[~np.isnan(bad_depths)]
+        qc.history.append(HistoryEntry(
+            institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+            software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+            start_depth=float(np.min(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+            stop_depth=float(np.max(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+            qc_flag="RC",
+            qc_flag_description=(
+                f"{int(np.sum(deep_bad))} TEMP sample(s) outside valid range "
+                f"[{TEMP_VALID_MIN}, {TEMP_DEEP_VALID_MAX}] degC (depth >= {TEMP_DEEP_BAND_DEPTH_M} m)"
+            ),
+        ))
+
+
 def _flag_spikes(qc: CastQC, now: datetime) -> None:
     """Flags a real TEMP value with no real data on either immediate side.
 
@@ -642,6 +724,47 @@ def _flag_spikes(qc: CastQC, now: datetime) -> None:
     ))
 
 
+def _flag_neighbour_average_spikes(qc: CastQC, now: datetime) -> None:
+    """Flags a real TEMP value that deviates from the average of its two
+    real immediate neighbours by more than SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C
+    (the standard 3-point spike-test formula, GTSPP Real-Time QC Manual,
+    IOC M&G No. 22). Additive to _flag_spikes (which only catches a reading
+    with NO real data on either side) -- this catches a reading with real,
+    but very different, neighbours instead. See
+    SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C's own comment for the real-data
+    validation behind this specific threshold. Applied to every cast, real
+    or test-probe, same as every other physical-plausibility check."""
+    temp = qc.cast.temperature_c
+    n = temp.size
+    if n < 3:
+        return
+    flagged = np.zeros(n, dtype=bool)
+    for i in range(1, n - 1):
+        v1, v2, v3 = temp[i - 1], temp[i], temp[i + 1]
+        if np.isnan(v1) or np.isnan(v2) or np.isnan(v3):
+            continue
+        if abs(v2 - (v1 + v3) / 2.0) > SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C:
+            flagged[i] = True
+    if not np.any(flagged):
+        return
+
+    qc.temperature_qc[flagged] = GTSPP_PROBABLY_BAD
+    bad_depths = qc.cast.depth_m[flagged]
+    valid_bad_depths = bad_depths[~np.isnan(bad_depths)]
+    qc.history.append(HistoryEntry(
+        institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+        software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+        start_depth=float(np.min(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+        stop_depth=float(np.max(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+        qc_flag="SP",
+        qc_flag_description=(
+            f"{int(np.sum(flagged))} TEMP reading(s) deviating from the average of "
+            f"their real neighbours by more than {SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C} degC "
+            "(CSIRO XBT QC Cookbook v1.1 section 3.3 / GTSPP Real-Time QC Manual spike test)"
+        ),
+    ))
+
+
 def apply_qc(casts: list) -> list:
     """Applies the 5 automated QC checks to a voyage's casts.
 
@@ -652,15 +775,19 @@ def apply_qc(casts: list) -> list:
     Returns:
         One CastQC per input cast, sorted into launch_time order.
 
-    A cast can accumulate at most 10 history entries: the surface-spike
+    A cast can accumulate at most 12 history entries: the surface-spike
     check emits 1 (CS), the speed check 2 (PE and TE, which cannot be told
     apart automatically), the probe-type check 1, the isolated-spike check 1
-    (SP), and the physical-plausibility range check up to 5 more (RC on
-    TEMP, DEPTH, SOUND_VELOCITY, LATITUDE, LONGITUDE -- each independent, so
-    worst case all 5 fire on the same cast). A test probe cast never reaches
-    the surface-spike check (see _remove_surface_spike's docstring) or the
-    first two, and emits at most 7 (TP + SP + up to 5 RC). Keep
-    build_xbt_netcdf._N_HISTORY at or above that ceiling.
+    (SP), the neighbour-average spike check 1 more (SP -- a second, distinct
+    entry, since a cast can trigger both the isolated and the
+    neighbour-average check independently), and the physical-plausibility
+    range check up to 6 more (RC -- TEMP alone can now produce 2 entries,
+    one per depth band, plus DEPTH, SOUND_VELOCITY, LATITUDE, LONGITUDE each
+    independently, so worst case 6 RC entries on the same cast). A test
+    probe cast never reaches the surface-spike check (see
+    _remove_surface_spike's docstring) or the first two, and emits at most
+    9 (TP + both SP checks + up to 6 RC). Keep build_xbt_netcdf._N_HISTORY
+    at or above that ceiling.
     """
     ordered = sorted(casts, key=lambda cast: cast.launch_time)
     now = datetime.utcnow()
@@ -796,9 +923,9 @@ def apply_qc(casts: list) -> list:
         # range" and guessing one risks repeating the exact mistake
         # FAULT_TEST_PROBE's wrong value was (see test_fault_bit_values_match_
         # appendix_f) -- fault_flags is deliberately left unset by all of these.
-        _flag_array_out_of_range(qc, qc.temperature_qc, cast.temperature_c,
-                                  TEMP_VALID_MIN, TEMP_VALID_MAX, "TEMP", "degC", now)
+        _flag_temperature_out_of_depth_band_range(qc, now)
         _flag_spikes(qc, now)
+        _flag_neighbour_average_spikes(qc, now)
         _flag_array_out_of_range(qc, qc.depth_qc, cast.depth_m,
                                   DEPTH_VALID_MIN, DEPTH_VALID_MAX, "DEPTH", "m", now)
         _flag_array_out_of_range(qc, qc.sound_velocity_qc, cast.sound_velocity_ms,

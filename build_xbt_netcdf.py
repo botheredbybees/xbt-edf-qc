@@ -40,7 +40,7 @@ _QC_FILL_VALUE = 99
 # each is independent, so worst case all 5 fire on the same cast). A test
 # probe cast reaches none of the first two nor the surface-spike check, and
 # emits at most 7 (TP + SP + up to 5 RC). See parse_xbt_edf.apply_qc.
-_N_HISTORY = 10
+_N_HISTORY = 12
 
 # Australian XBT Quality Control Cookbook v2.1 (Cowley & Krummel, CSIRO 2022),
 # Appendix F pp.86-87.

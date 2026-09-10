@@ -172,10 +172,15 @@ def test_depth_qc_defaults_to_good_for_a_clean_cast():
     assert qc.depth_qc.shape == qc.cast.depth_m.shape
 
 
-def test_a_cast_can_trigger_at_most_four_history_entries():
-    # The speed check emits 2 entries (PE + TE), the probe-type check 1, and
-    # the TEMP range check 1 (RC) -- the isolated-spike check does not fire
-    # here since 999.0 has real (not missing) neighbours on both sides.
+def test_a_cast_can_trigger_at_most_five_history_entries():
+    # The speed check emits 2 entries (PE + TE), the probe-type check 1, the
+    # TEMP range check 1 (RC), and -- since NDO-708 -- the neighbour-average
+    # spike check 1 more (SP): 999.0 has real (non-NaN) neighbours on both
+    # sides, which the isolated-only check ignores but the neighbour-average
+    # check exists specifically to catch (a real value that wildly disagrees
+    # with its real neighbours). This is the expected, validated new
+    # behaviour, not a regression -- confirms the two checks are genuinely
+    # complementary, not just independently correct in isolation.
     first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
     second = _cast(
         launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0,
@@ -183,7 +188,7 @@ def test_a_cast_can_trigger_at_most_four_history_entries():
         temperature_c=np.array([10.0, 999.0, 10.0]),
     )
     _, qc_second = apply_qc([first, second])
-    assert [entry.qc_flag for entry in qc_second.history] == ["PE", "TE", "PR", "RC"]
+    assert [entry.qc_flag for entry in qc_second.history] == ["PE", "TE", "PR", "RC", "SP"]
 
     from build_xbt_netcdf import _N_HISTORY
     assert len(qc_second.history) <= _N_HISTORY
@@ -200,7 +205,13 @@ def test_temperature_outside_valid_range_flags_only_the_bad_points():
 
 
 def test_temperature_within_valid_range_never_gets_an_rc_entry():
-    cast = _cast(temperature_c=np.array([TEMP_VALID_MIN, 10.0, TEMP_VALID_MAX]))
+    # Middle value is deliberately the average of the two boundary values,
+    # so this exercises only the range check -- a big point-to-point jump
+    # between -2.5 and 40.0 would also trip the (separately tested)
+    # neighbour-average spike check, which isn't what this test is about.
+    cast = _cast(temperature_c=np.array(
+        [TEMP_VALID_MIN, (TEMP_VALID_MIN + TEMP_VALID_MAX) / 2, TEMP_VALID_MAX]
+    ))
     [qc] = apply_qc([cast])
     assert np.all(qc.temperature_qc == GTSPP_GOOD)
     assert "RC" not in [entry.qc_flag for entry in qc.history]
@@ -593,3 +604,149 @@ def test_casts_are_qcd_in_launch_time_order_regardless_of_input_order():
     late = _cast(launch_time=datetime(2025, 3, 1, 13, 0, 0), latitude=-42.1, longitude=147.0)
     results = apply_qc([late, early])  # deliberately out of order
     assert [qc.cast.launch_time for qc in results] == [early.launch_time, late.launch_time]
+
+
+def test_temperature_shallow_band_uses_the_existing_flat_bound():
+    # A moderate, gently-varying profile -- comfortably within the flat
+    # -2.5..40 bound and without any point-to-point jump big enough to also
+    # trip the (separately tested) neighbour-average spike check.
+    from parse_xbt_edf import TEMP_DEEP_BAND_DEPTH_M
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([10.0, 12.0, 14.0]),
+    )
+    assert cast.depth_m[-1] < TEMP_DEEP_BAND_DEPTH_M
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+
+
+def test_temperature_shallow_band_still_flags_outside_the_flat_bound():
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([10.0, TEMP_VALID_MAX + 1.0, 10.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_GOOD]
+    [entry] = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
+    assert "1 TEMP sample" in entry.qc_flag_description
+    assert "depth < 1500.0" in entry.qc_flag_description
+
+
+def test_temperature_deep_band_flags_a_value_the_shallow_bound_would_have_passed():
+    from parse_xbt_edf import TEMP_DEEP_BAND_DEPTH_M, TEMP_DEEP_VALID_MAX
+    cast = _cast(
+        depth_m=np.array([10.0, TEMP_DEEP_BAND_DEPTH_M + 100.0, 20.0]),
+        temperature_c=np.array([5.0, TEMP_DEEP_VALID_MAX + 5.0, 5.0]),
+    )
+    assert TEMP_DEEP_VALID_MAX + 5.0 <= TEMP_VALID_MAX  # would have passed the old flat bound
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_GOOD]
+    [entry] = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
+    assert "depth >= 1500.0" in entry.qc_flag_description
+
+
+def test_temperature_deep_band_at_exactly_the_boundary_depth_uses_the_tighter_bound():
+    from parse_xbt_edf import TEMP_DEEP_BAND_DEPTH_M, TEMP_DEEP_VALID_MAX
+    cast = _cast(
+        depth_m=np.array([10.0, TEMP_DEEP_BAND_DEPTH_M, 20.0]),
+        temperature_c=np.array([5.0, TEMP_DEEP_VALID_MAX + 1.0, 5.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert qc.temperature_qc[1] == GTSPP_PROBABLY_BAD
+
+
+def test_temperature_deep_band_within_tightened_bound_stays_good():
+    # All three points sit in the deep band, close together and right at the
+    # tightened bound -- exercises only the depth-band range check, without a
+    # point-to-point jump big enough to also trip the (separately tested)
+    # neighbour-average spike check.
+    from parse_xbt_edf import TEMP_DEEP_BAND_DEPTH_M, TEMP_DEEP_VALID_MAX
+    cast = _cast(
+        depth_m=np.array(
+            [TEMP_DEEP_BAND_DEPTH_M + 50.0, TEMP_DEEP_BAND_DEPTH_M + 100.0, TEMP_DEEP_BAND_DEPTH_M + 150.0]
+        ),
+        temperature_c=np.array([TEMP_DEEP_VALID_MAX - 1.0, TEMP_DEEP_VALID_MAX, TEMP_DEEP_VALID_MAX - 1.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+
+
+def test_temperature_both_bands_bad_produces_two_separate_rc_entries():
+    from parse_xbt_edf import TEMP_DEEP_BAND_DEPTH_M, TEMP_DEEP_VALID_MAX
+    cast = _cast(
+        depth_m=np.array([10.0, TEMP_DEEP_BAND_DEPTH_M + 100.0]),
+        temperature_c=np.array([TEMP_VALID_MAX + 1.0, TEMP_DEEP_VALID_MAX + 1.0]),
+    )
+    [qc] = apply_qc([cast])
+    rc_entries = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
+    assert len(rc_entries) == 2
+    assert list(qc.temperature_qc) == [GTSPP_PROBABLY_BAD, GTSPP_PROBABLY_BAD]
+
+
+def test_neighbour_average_spike_agreeing_neighbours_stays_good():
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([5.0, 5.5, 5.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+    assert "SP" not in [e.qc_flag for e in qc.history]
+
+
+def test_neighbour_average_spike_real_spike_is_flagged():
+    from parse_xbt_edf import SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([5.0, 5.0 + SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C + 1.0, 5.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_GOOD]
+    [entry] = [e for e in qc.history if e.qc_flag == "SP" and "neighbours" in e.qc_flag_description]
+    assert "1 TEMP reading" in entry.qc_flag_description
+    assert "2.0" in entry.qc_flag_description
+
+
+def test_neighbour_average_spike_exactly_at_threshold_stays_good():
+    from parse_xbt_edf import SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([5.0, 5.0 + SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C, 5.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+
+
+def test_neighbour_average_spike_one_missing_neighbour_is_not_evaluated():
+    # Complementary to _flag_spikes -- that check handles the fully-isolated
+    # (both sides missing) case; this one needs BOTH real neighbours to
+    # compute an average at all.
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([5.0, np.nan, 20.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_MISSING, GTSPP_GOOD]
+    assert "SP" not in [e.qc_flag for e in qc.history]
+
+
+def test_neighbour_average_spike_catches_a_synthetic_wire_stretch_ramp():
+    # The real-data validation found this formula also catches the
+    # "wire-stretch" fault class (a smooth, physically-impossible ramp) as
+    # a side effect, not just isolated single-point spikes -- confirm that
+    # shape is genuinely detected, not just a coincidence of the real data.
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0]),
+        temperature_c=np.array([-1.4, -1.4, -1.0, 9.5, 21.7, 29.4]),
+    )
+    [qc] = apply_qc([cast])
+    assert np.sum(qc.temperature_qc == GTSPP_PROBABLY_BAD) >= 2
+
+
+def test_neighbour_average_spike_check_also_applies_to_test_probe_casts():
+    cast = _cast(
+        serial_number="TestProbe",
+        depth_m=np.array([0.0, 1.0, 2.0]),
+        temperature_c=np.array([1.51, 1.5 + 5.0, 1.49]),
+    )
+    [qc] = apply_qc([cast])
+    assert qc.temperature_qc[1] == GTSPP_PROBABLY_BAD
