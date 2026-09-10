@@ -434,6 +434,57 @@ exactly what a wire-stretch ramp looks like locally.
 **Validate against real data, always, before trusting a threshold you
 haven't run against anything but the cookbook's own worked examples.**
 
+**A climatology-aware bounds check (NDO-686), modelled on ioos_qc's
+`climatology_test`, was investigated for TEMP using NOAA's World Ocean
+Atlas (WOA23) and found not viable for this ship's operating region —
+closed as won't-fix, not implemented.** The idea: replace the flat,
+unvalidated shallow-band TEMP bound (-2.5..40°C) with a per-location,
+per-season expected range derived from WOA's `t_an` (climatological mean)
+and `t_sd` (standard deviation), the same statistical-bound approach
+`TEMP_DEEP_VALID_MAX` and the spike-test threshold were validated with.
+Two real, sequential findings killed it:
+
+1. **WOA's monthly climatology is too sparsely sampled here to trust its
+   own `t_sd`.** Checked against this ship's real operating envelope
+   (369 casts, -70° to -41° latitude): the median WOA grid cell has only
+   **3** historical observations behind it, and 43% of real (cast, depth)
+   lookups land in a cell built from 2 or fewer. A standard deviation
+   computed from 2 profiles is not a real measure of variability — it
+   produced flagged "deviations" of thousands of standard deviations from
+   completely ordinary temperature readings. WOA's *annual* climatology
+   (pooling all months) fixed this specifically — median observation
+   count rose to 48 — but that's a sample-size fix, not the real problem.
+2. **Even with adequate sample counts, a fixed climatological mean is a
+   poor "expected value" in this region.** Southern Ocean fronts (the
+   Antarctic Circumpolar Current's Subantarctic and Polar Fronts
+   specifically) meander by degrees of latitude from their long-term
+   average position on any given voyage. A real, correct cast taken on
+   the warm side of where WOA's multi-decade average places a front will
+   legitimately read many WOA standard deviations away from the
+   climatological mean, with nothing wrong with the data. Confirmed
+   directly: one real cast (54.5°S, 119.5°E) had ~600 consecutive points
+   of smooth, physically sane 9-13°C water column flagged purely because
+   WOA's climatological mean at that exact cell is 2-3°C — a real ~7-10°C
+   offset from a shifted front, not a fault. Net result across the real
+   archive: **42.5% of real casts (136 of 320) had at least one point
+   flagged** at a threshold (6 standard deviations) already far looser
+   than every other check in this document — several orders of magnitude
+   worse than any other check's false-positive rate.
+
+The one genuine fault this investigation did surface in that same example
+cast (a 32.6°C jump at 637m, an obvious sensor fault) was already caught
+independently by the existing neighbour-average spike check — WOA added
+nothing there but the 600 false positives above it. **The lesson
+generalises past this specific attempt:** an external reference dataset
+being authoritative and well-documented (WOA is both) is not the same as
+it being *the right kind of reference* for a specific check in a specific
+region — a static climatological mean is fundamentally the wrong tool
+where the dominant source of real variability is large, mobile, mesoscale
+structure rather than smooth seasonal change. This finding likely
+generalises to the underway-merger pipeline's own gross-range bounds too
+(same ship, same region, same frontal dynamics) — not separately tested,
+but worth checking before attempting the same approach there.
+
 ## Open questions
 
 - Whether the 2022 edition (v2.1) retired or consolidated any of the 1994
