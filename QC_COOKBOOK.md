@@ -28,6 +28,7 @@ running against real data, not by inspection.
   - [Test Probe detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else)
   - [Surface Spikes — CS](#surface-spikes--cs-v11-section-21)
   - [Isolated readings with no real neighbours — SP](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes)
+  - [Neighbour-average Spikes retest — SP](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)
   - [Speed check — PE / TE](#speed-check--pe--te-v11-section-424425)
   - [Probe-type check — PR](#probe-type-check--pr-v11-section-426)
   - [Physical-plausibility range check — RC](#physical-plausibility-range-check--rc)
@@ -65,10 +66,10 @@ own, independent of `HISTORY_QC_FLAG`.
 | CS (Accept / CSA) | [Surface Spikes](#surface-spikes--cs-v11-section-21) | Real casts | TEMP → missing above 3.7 m | none | ✅ Implemented |
 | CS (Reject / CSR) | ↳ transient below 3.7 m | — | — | — | ❌ Not implemented — needs operator judgement |
 | SP | [Isolated readings](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes) (zero real neighbours) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (narrowed scope) |
-| — | ↳ full neighbour-average "Spikes" formula | — | — | — | 🔬 Tried, rejected (97 false positives on real data — [details](#what-we-tried-and-rejected)) |
+| SP | ↳ [full neighbour-average "Spikes" formula, at GTSPP's 2.0°C](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (retried at GTSPP's threshold, not the cookbook's 0.2°C — [details](#what-we-tried-and-rejected)) |
 | PE + TE | [Speed check](#speed-check--pe--te-v11-section-424425) | Real casts, vs. previous real cast | LATITUDE/LONGITUDE/TIME/TEMP → probably bad, both codes together | `FAULT_POSITION_ERROR` + `FAULT_TIME_ERROR` | ✅ Implemented (both emitted, can't disambiguate) |
 | PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
-| RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented |
+| RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 1500 m — [details](#physical-plausibility-range-check--rc)) |
 | — | Wire Stretch (§4.4/4.5) | — | — | — | ❌ Not automated — usually still caught indirectly via `SOUND_VELOCITY` RC ([details](#what-we-tried-and-rejected)) |
 | SPR | Severe multi-point spiking (§3.3) | — | — | — | ❌ Not implemented — see [Open questions](#open-questions) |
 
@@ -132,16 +133,32 @@ the point the rest of the cast had already failed. Applied to every cast,
 real or test-probe, same as the [range check](#physical-plausibility-range-check--rc)
 below.
 
-#### Not implemented: full neighbour-average "Spikes" formula
+### Neighbour-average Spikes retest — SP (v1.1 section 3.3 / GTSPP Real-Time QC Manual)
 
-**This is narrower than a literal reading of section 3.3.** The cookbook
-describes "Spikes" as any isolated deviation from *real* neighbours, with
-a >0.2°C threshold and a standard reference-average formula (average the
-two neighbours, flag the point between them if it deviates by more than
-the threshold — the same formula used in, e.g., the IOOS/QARTOD real-time
-QC manuals). **That version was built, then dropped after validation** —
-see [What we tried and rejected](#what-we-tried-and-rejected) below. Only
-the zero-real-neighbours case ships.
+**Status:** Implemented, at GTSPP's 2.0°C threshold rather than the
+cookbook's own 0.2°C.
+
+The full formula section 3.3 actually describes: average a point's two real
+immediate neighbours, flag it if it deviates from that average by more than
+a threshold. **This was tried once already at the cookbook's literal 0.2°C
+figure and dropped** — it fired on genuine real oceanographic fine-scale
+structure, not faults (see [What we tried and
+rejected](#what-we-tried-and-rejected)). It was never retried at a looser
+threshold until NDO-708: the GTSPP Real-Time QC Manual (IOC Manuals &
+Guides No. 22) publishes the same reference-average spike-test formula with
+a **2.0°C** threshold instead. Re-run against the same real historical
+archive at 2.0°C, it flagged **190 samples across 112 of 369 profiles**,
+with **zero apparent false positives** on inspection — every flagged point
+sits at the edge of a sharp, fault-shaped ramp (tens of degrees over one or
+two samples), not the sub-1°C step structure that sank the 0.2°C attempt.
+As a side effect, this formula also catches the "Wire Stretch" fault shape
+(below) at any point along a steep-enough ramp, since each such point
+deviates from its neighbours' average too — not by design, but confirmed
+useful in practice. Applied to every cast, real or test-probe, same as
+every other physical-plausibility check; additive to (not a replacement
+for) the zero-real-neighbours case above — that case still catches
+genuinely isolated readings this formula can't evaluate (it needs two
+*real* neighbours).
 
 ### Speed check — PE / TE (v1.1 section 4.2.4/4.2.5)
 
@@ -190,6 +207,29 @@ NetCDF attribute and this check, specifically so metadata and enforcement
 can't drift apart again — see [Constants reference](#constants-reference)
 for the exact values and where each comes from.
 
+#### TEMP is depth-banded, not one flat range (v1.1 section 2.4 "Profile Envelope")
+
+**Status:** Implemented (NDO-705). TEMP's range check tightens below
+**1500 m**: the flat -2.5..40°C bound still applies above that depth, but
+below it the upper bound drops to **20.0°C**. This replaced a single flat
+range check across the whole profile.
+
+The cookbook's own "Profile Envelope" concept — a depth-varying plausible
+range, tighter than the whole-profile bound — was only automated where the
+real historical archive actually supports it. Checked at every depth band
+before picking 1500 m specifically: the deep water this ship actually
+operates in (Southern Ocean, not the tropics the flat 40°C bound is
+sized for) shows a clean statistical gap only from 1500 m down — real data
+tops out at **16.92°C** at that depth and below, while the nearest known
+fault cluster starts at **32.04°C**, a wide enough margin that 20.0°C
+sits safely in between with no risk of catching real structure. Shallower
+than 1500 m, real near-surface/thermocline water genuinely reaches high
+enough temperatures that a tighter bound isn't safe to draw from this
+archive — the flat bound stays there. Don't reuse the 1500 m/20.0°C figures
+for a different ship or region without re-running this same real-data check
+against that ship's own archive — see [What we tried and
+rejected](#what-we-tried-and-rejected).
+
 ## Constants reference
 
 Every threshold used above, with its exact value and where it comes from.
@@ -205,7 +245,10 @@ be checked against each other without reading the source.
 | `TEST_PROBE_MAX_TEMPERATURE_VARIATION_C` | 0.005°C | Failed self-test warning (TP) | Cookbook, v1.1 §2.2 |
 | `SURFACE_SPIKE_DEPTH_M` | 3.7 m | Surface Spikes (CS) | Cookbook, v1.1 §2.1 |
 | `MAX_PLAUSIBLE_SPEED_KNOTS` | 25.0 kn | Speed check (PE/TE) | Cookbook, v1.1 §4.2.4/4.2.5 |
-| `TEMP_VALID_MIN` / `TEMP_VALID_MAX` | −2.5°C / 40.0°C | Range check (RC) | Cookbook/GTSPP convention |
+| `TEMP_VALID_MIN` / `TEMP_VALID_MAX` | −2.5°C / 40.0°C | Range check (RC), depths < 1500 m | Cookbook/GTSPP convention |
+| `TEMP_DEEP_BAND_DEPTH_M` | 1500.0 m | Range check (RC) — depth-band boundary | Real-data statistical gap, this ship's own archive (see [above](#temp-is-depth-banded-not-one-flat-range-v11-section-24-profile-envelope)) |
+| `TEMP_DEEP_VALID_MAX` | 20.0°C | Range check (RC), depths ≥ 1500 m | Real-data statistical gap, this ship's own archive — same source as `TEMP_DEEP_BAND_DEPTH_M` |
+| `SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C` | 2.0°C | Neighbour-average Spikes retest (SP) | GTSPP Real-Time QC Manual (IOC M&G No. 22), not the cookbook's own 0.2°C (rejected — see [below](#what-we-tried-and-rejected)) |
 | `LATITUDE_VALID_MIN` / `_MAX` | −90° / 90° | Range check (RC) | Physical bound |
 | `LONGITUDE_VALID_MIN` / `_MAX` | −180° / 180° | Range check (RC) | Physical bound |
 | `DEPTH_VALID_MIN` | −1.0 m | Range check (RC) | Small negative slop for near-surface sensor/calibration noise |
@@ -250,6 +293,35 @@ against the same 368 profiles: **23 genuine faults, all 30-37°C at depths
 where that's physically impossible for real Southern Ocean water, zero
 apparent false positives.**
 
+**Retried later (NDO-708) at a looser threshold, and this time it shipped.**
+The 0.2°C figure above is the *cookbook's* number; the GTSPP Real-Time QC
+Manual (IOC M&G No. 22) publishes the same reference-average formula with
+its own, much looser **2.0°C** threshold. That had never been tried — the
+check was dropped once at 0.2°C and never revisited at a different value.
+Run against the full 369-profile archive (one profile more than the 368
+above; the archive had grown by then) at 2.0°C: **190 flagged samples
+across 112 profiles, zero apparent false positives** on inspection of every
+flag's margin above threshold — even the closest-to-threshold flags
+(e.g. a jump from 9.46°C to 16.09°C to 18.71°C at 904 m, deviation
+2.005°C) are sharp fault-onset ramps, not the sub-1°C fine-scale structure
+that sank the 0.2°C attempt. See [Neighbour-average Spikes
+retest](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)
+above for the shipped implementation.
+
+**The TEMP range check's depth-banded envelope (NDO-705) went through the
+same real-data-first process.** The cookbook's "Profile Envelope" concept
+(section 2.4) suggests a depth-varying plausible range is possible in
+principle, but doesn't hand over exact numbers to use. Checked band-by-band
+against the same archive before picking anything: only the deepest band
+(≥1500 m) shows a clean gap between real data (max 16.92°C at those
+depths) and the nearest known fault cluster (starting at 32.04°C) — wide
+enough to draw a bound through safely. No other depth band showed a
+comparably clean gap in this ship's own data, so no other band got
+tightened. **The lesson generalises past both of these specific checks:**
+a plausible-looking bound (a rounder number, a value from a different
+ship's cookbook, a threshold from a different ocean) is not evidence it's
+safe for *this* ship's data — only running it against the real archive is.
+
 **"Wire Stretch" (v1.1 sections 4.4/4.5)** — a sustained, real-looking
 warming trend with depth over a wide range — was found in the same real
 data (a ~7°C ramp over 33 m, suspiciously close to perfectly linear) but
@@ -268,13 +340,20 @@ haven't run against anything but the cookbook's own worked examples.**
 ## Open questions
 
 - Whether the 2022 edition (v2.1) retired or consolidated any of the 1994
-  edition's ~30 flag categories (Appendix A), and whether it revises either
-  numeric threshold used above (3.7 m, 0.2°C) — unresolved as of this
-  writing; a question is out to one of the 2022 edition's co-authors.
+  edition's ~30 flag categories (Appendix A), and whether it revises the
+  3.7 m surface-spike depth used above — unresolved as of this writing; a
+  question is out to one of the 2022 edition's co-authors. (The 0.2°C
+  neighbour-average threshold this question used to also cover is no
+  longer open in the same sense — this pipeline now ships GTSPP's own 2.0°C
+  figure for that check instead of the cookbook's, so a 2022-edition
+  revision to 0.2°C specifically wouldn't change what's shipped either way.)
 - "Wire Stretch" and the multi-point "severe spiking... over a wide range
   of depths" case (v1.1 section 3.3, Reject code SPR) are both real,
-  found-in-practice fault shapes with no automated check yet — see
-  [What we tried and rejected](#what-we-tried-and-rejected).
+  found-in-practice fault shapes with no *dedicated* automated check yet —
+  see [What we tried and rejected](#what-we-tried-and-rejected). The
+  neighbour-average spike retest (above) catches wire-stretch as a side
+  effect at any point along a steep-enough ramp, but that's incidental,
+  not a purpose-built detector for the shape as a whole.
 
 ## References
 
