@@ -28,6 +28,7 @@ running against real data, not by inspection.
   - [Test Probe detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else)
   - [Surface Spikes — CS](#surface-spikes--cs-v11-section-21)
   - [Isolated readings with no real neighbours — SP](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes)
+  - [Wire Break cascade — WB](#wire-break-cascade--wb-v11-section-32)
   - [Neighbour-average Spikes retest — SP](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)
   - [Speed check — PE / TE](#speed-check--pe--te-v11-section-424425)
   - [Probe-type check — PR](#probe-type-check--pr-v11-section-426)
@@ -66,6 +67,7 @@ own, independent of `HISTORY_QC_FLAG`.
 | CS (Accept / CSA) | [Surface Spikes](#surface-spikes--cs-v11-section-21) | Real casts | TEMP → missing above 3.7 m | none | ✅ Implemented |
 | CS (Reject / CSR) | ↳ transient below 3.7 m | — | — | — | ❌ Not implemented — needs operator judgement |
 | SP | [Isolated readings](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes) (zero real neighbours) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (narrowed scope) |
+| WB | [Wire Break cascade](#wire-break-cascade--wb-v11-section-32) (unrecovered NaN run at cast end) | All casts, incl. self-test | Audit trail only — no `_qc` change | none | ✅ Implemented |
 | SP | ↳ [full neighbour-average "Spikes" formula, at GTSPP's 2.0°C](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (retried at GTSPP's threshold, not the cookbook's 0.2°C — [details](#what-we-tried-and-rejected)) |
 | PE + TE | [Speed check](#speed-check--pe--te-v11-section-424425) | Real casts, vs. previous real cast | LATITUDE/LONGITUDE/TIME/TEMP → probably bad, both codes together | `FAULT_POSITION_ERROR` + `FAULT_TIME_ERROR` | ✅ Implemented (both emitted, can't disambiguate) |
 | PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
@@ -132,6 +134,59 @@ off scale" (section 3.2), leaving a stray reading that survived alone past
 the point the rest of the cast had already failed. Applied to every cast,
 real or test-probe, same as the [range check](#physical-plausibility-range-check--rc)
 below.
+
+### Wire Break cascade — WB (v1.1 section 3.2)
+
+**Status:** Implemented (NDO-728), audit-trail only.
+
+The cookbook's own Wire Break text — quoted above in the "Isolated readings" section as
+background — actually specifies its own check: "the bottom of the XBT profile exhibits a
+sudden deflection to the high or low temperature end of the scale... Downgrade data to Class 4
+from depth of initial point of damage." This pipeline cited that text for years without ever
+automating it as its own check; NDO-728 does.
+
+When a cast's TEMP record ends in a run of `NaN` samples with no real value recovering before
+the cast's own end, one `WB` history entry is recorded, naming the run's depth range. **This
+changes no `_qc` flag values at all** — every `NaN` sample already becomes `GTSPP_MISSING` via
+`CastQC`'s own initialisation, before any check runs, so a terminal fault tail was already
+correctly excluded from "good" data before this check existed. What WB adds is the audit
+trail: a reader of `HISTORY_QC_FLAG` can now tell *why* a cast's tail is missing (a Wire
+Break-shaped fault, cited to the cookbook) instead of an unexplained gap.
+
+**Suggested by Alison Herbert (Senior Acoustics Officer, Polar Technology)**, after reviewing
+the NDO-654/645 XBT self-test findings, in wording broader than what shipped: "as soon as
+there is a `-99`, just discard the rest of the values in that profile." Checked against all
+369 real casts' raw EDF files before automating anything, per this document's own real-data
+discipline (see [What we tried and rejected](#what-we-tried-and-rejected)):
+
+- 133 of 369 real casts have at least one `NaN` run in TEMP.
+- 130 of those have a run that reaches the cast's own end with no recovery — the clean Wire
+  Break shape this check targets.
+- 44 of those 130 *also* have an earlier, separate `NaN` run that recovered before the cast
+  ended (lengths 1-632 samples, with 8-685 real-looking samples still following before the
+  cast's actual end).
+
+Applying Alison's suggestion literally — discard from the *first* `-99` onward, recovery or
+not — would have discarded most of some real casts over a single mid-cast dropout the
+instrument evidently recovered from (one real case would lose 878 of its 1226 samples). Run
+length alone doesn't separate a genuine terminal cascade from a recovered mid-cast blip either
+— the shortest terminal cascade in the archive (4 samples) is the same length as a run that
+went on to recover. The one signal the real data actually supports cleanly is the narrower
+rule this check implements: does the cast's *last* `NaN` run reach the array's end? Mid-cast
+recoveries are left alone; telling a genuinely recovered real reading apart from a suspicious
+residual artifact near a fault (the harder question in Alison's original suggestion) isn't
+attempted here.
+
+**This check's justification is different in kind from every other check in this document —
+say so plainly, don't let a future reader assume it's purely statistical.** The clearest real
+example behind it, a self-test cast's continuous 43-second `-99` tail with zero recovery, was
+traced to a **ship procedure**, not a data pattern discoverable from first principles: WinMK21's
+self-test protocol has the operator at the junction box physically disconnect the alligator
+clips *before* the operator at the PC presses "End Probe Drop" in the software, so the circuit
+sits open — and the DAQ keeps recording that open-circuit state as `-99` — for however long
+that gap takes. Every other check in this document is justified by the data and the physics
+alone; this one's real-world justification also depends on knowing how the crew actually run
+the test, which nothing about the raw EDF file itself can tell you.
 
 ### Neighbour-average Spikes retest — SP (v1.1 section 3.3 / GTSPP Real-Time QC Manual)
 
