@@ -14,6 +14,7 @@ dependencies = [
     "pandas>=2.0",
     "xarray>=2023.1",
     "netCDF4>=1.6",
+    "global-land-mask>=1.0",
 ]
 
 [project.urls]

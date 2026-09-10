@@ -18,7 +18,7 @@ def _cast(**overrides):
         probe_type="DB",
         launch_time=datetime(2025, 3, 1, 12, 0, 0),
         latitude=-42.0,
-        longitude=147.0,
+        longitude=149.0,
         serial_number="123",
         voyage_id="202425030",
         # Beyond SURFACE_SPIKE_DEPTH_M (3.7 m) so the surface-spike QC check
@@ -54,10 +54,10 @@ def test_depth_dimension_padded_to_longest_cast():
 
 
 def test_scalar_profile_variables():
-    casts_qc = apply_qc([_cast(latitude=-42.5, longitude=147.5)])
+    casts_qc = apply_qc([_cast(latitude=-42.5, longitude=149.5)])
     ds = build_xbt_netcdf(casts_qc)
     assert ds["LATITUDE"].values[0] == pytest.approx(-42.5)
-    assert ds["LONGITUDE"].values[0] == pytest.approx(147.5)
+    assert ds["LONGITUDE"].values[0] == pytest.approx(149.5)
     assert ds["PROBE_TYPE"].values[0] == "DB"
     assert ds["PROBE_TYPE_RAW"].values[0] == "DB"
 
@@ -72,8 +72,8 @@ def test_quality_control_companion_variables_present_with_correct_defaults():
 
 
 def test_position_error_flag_is_reflected_in_the_dataset():
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0)
     casts_qc = apply_qc([first, second])
     ds = build_xbt_netcdf(casts_qc)
     assert ds["LATITUDE_quality_control"].values[1] == 3
@@ -82,8 +82,8 @@ def test_position_error_flag_is_reflected_in_the_dataset():
 def test_position_and_time_error_fault_bits_both_set_together():
     # An automated speed-check hit can't distinguish PE from TE, so both fault
     # bits are set together, matching the PE+TE history-entry split.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0)
     ds = build_xbt_netcdf(apply_qc([first, second]))
     from parse_xbt_edf import FAULT_POSITION_ERROR, FAULT_TIME_ERROR
     flagged = ds["XBT_fault_and_feature_flag_type"].values[1]
@@ -92,8 +92,8 @@ def test_position_and_time_error_fault_bits_both_set_together():
 
 
 def test_history_variables_populated_for_a_flagged_cast():
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0)
     casts_qc = apply_qc([first, second])
     ds = build_xbt_netcdf(casts_qc)
     assert ds.dims["N_HISTORY"] == 13
@@ -107,8 +107,8 @@ def test_history_variables_populated_for_a_flagged_cast():
 def test_history_previous_value_is_always_the_fill():
     # Appendix F p.88: "Parameter previous value before action". These checks
     # only flag, never correct, so there is no previous value to report.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0)
     ds = build_xbt_netcdf(apply_qc([first, second]))
     assert np.all(np.isnan(ds["HISTORY_PREVIOUS_VALUE"].values))
     assert ds["HISTORY_PREVIOUS_VALUE"].attrs["long_name"] == (
@@ -137,7 +137,7 @@ def test_n_history_capacity_covers_the_worst_case_cast():
     # in an unrecovered NaN run) -- this fixture doesn't hit that ceiling,
     # so the two trailing slots are the fixed-width array's own
     # empty-string padding, not a missing finding.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
     second = _cast(
         launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=95.0, longitude=185.0,
         probe_type_raw="NotARealProbe", probe_type="NotARealProbe",
@@ -244,8 +244,8 @@ def test_history_step_value_is_our_own_identifier_not_a_gtspp_prc_code():
     # documentation; it must not tempt anyone into writing a real PRC_CODE
     # like the cookbook example's "CSCB", which would falsely claim CSIRO's
     # own formal QC process had run over this data.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0)
     ds = build_xbt_netcdf(apply_qc([first, second]))
     assert ds["HISTORY_STEP"].values[1, 0] == "AADC_XBT_QC"
     assert ds["HISTORY_INSTITUTION"].values[1, 0] == "Australian Antarctic Division"
@@ -433,8 +433,8 @@ def test_history_date_nat_slots_round_trip_with_fixed_epoch(tmp_path):
     # The failed speed check fires two entries on the second cast (PE and TE),
     # filling slots 0 and 1 and leaving only slot 2 NaT -- confirm the
     # fixed-epoch encoding doesn't break that fill.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0)
     casts_qc = apply_qc([first, second])
     ds = build_xbt_netcdf(casts_qc)
     nc_path = tmp_path / "nat_check.nc"

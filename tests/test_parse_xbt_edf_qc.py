@@ -42,7 +42,7 @@ def _cast(**overrides):
         probe_type="DB",
         launch_time=datetime(2025, 3, 1, 12, 0, 0),
         latitude=-42.0,
-        longitude=147.0,
+        longitude=149.0,
         serial_number="123",
         voyage_id="202425030",
         # Beyond SURFACE_SPIKE_DEPTH_M (3.7 m) so the surface-spike check
@@ -69,8 +69,8 @@ def test_normal_cast_gets_all_good_flags():
 
 def _speed_check_pair():
     # 60 nautical miles apart, 10 minutes apart -> 360 knots, way over the 25kt threshold
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0)
     return apply_qc([first, second])
 
 
@@ -113,9 +113,9 @@ def test_speed_check_downgrades_temperature_but_not_depth():
 
 
 def test_speed_check_temperature_downgrade_preserves_missing_flags():
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
     second = _cast(
-        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0,
+        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0,
         temperature_c=np.array([10.0, np.nan, 9.0]),
     )
     _, qc_second = apply_qc([first, second])
@@ -128,8 +128,8 @@ def test_speed_check_temperature_downgrade_preserves_missing_flags():
 
 def test_plausible_speed_between_casts_stays_good():
     # ~6 nautical miles apart, 1 hour apart -> 6 knots, well under the threshold
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    second = _cast(launch_time=datetime(2025, 3, 1, 13, 0, 0), latitude=-42.1, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    second = _cast(launch_time=datetime(2025, 3, 1, 13, 0, 0), latitude=-42.1, longitude=149.0)
     _, qc_second = apply_qc([first, second])
     assert qc_second.latitude_qc == GTSPP_GOOD
     assert qc_second.history == []
@@ -181,9 +181,9 @@ def test_a_cast_can_trigger_at_most_five_history_entries():
     # with its real neighbours). This is the expected, validated new
     # behaviour, not a regression -- confirms the two checks are genuinely
     # complementary, not just independently correct in isolation.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
     second = _cast(
-        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0,
+        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0,
         probe_type_raw="NotARealProbe", probe_type="NotARealProbe",
         temperature_c=np.array([10.0, 999.0, 10.0]),
     )
@@ -250,7 +250,7 @@ def test_longitude_outside_valid_range_downgrades_the_scalar_flag():
 
 
 def test_latitude_and_longitude_within_range_never_get_an_rc_entry():
-    cast = _cast(latitude=-42.0, longitude=147.0)
+    cast = _cast(latitude=-42.0, longitude=149.0)
     [qc] = apply_qc([cast])
     assert qc.latitude_qc == GTSPP_GOOD
     assert qc.longitude_qc == GTSPP_GOOD
@@ -413,9 +413,9 @@ def test_history_previous_value_is_never_repurposed_as_a_diagnostic():
     # value before action" -- a previous *data* value. These checks only flag,
     # never correct, so there is no previous value and the field stays NaN;
     # the diagnostic lives in qc_flag_description instead.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
     second = _cast(
-        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=147.0,
+        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0,
         probe_type_raw="NotARealProbe", probe_type="NotARealProbe",
     )
     unstable_test_probe = _cast(
@@ -534,12 +534,12 @@ def test_brief_surface_coincidence_near_1_5c_is_not_a_test_probe():
 def test_test_probe_never_participates_in_the_speed_check():
     # A self-test cast sitting between two widely-separated real casts must not
     # itself get flagged, and must not become the "previous real cast" reference.
-    real_1 = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
+    real_1 = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
     test_probe = _cast(
         serial_number="TestProbe",
-        launch_time=datetime(2025, 3, 1, 12, 5, 0), latitude=-42.0, longitude=147.0,
+        launch_time=datetime(2025, 3, 1, 12, 5, 0), latitude=-42.0, longitude=149.0,
     )
-    real_2 = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-42.05, longitude=147.0)
+    real_2 = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-42.05, longitude=149.0)
     _, qc_test, qc_real_2 = apply_qc([real_1, test_probe, real_2])
     assert qc_test.latitude_qc == GTSPP_GOOD
     assert qc_real_2.latitude_qc == GTSPP_GOOD  # real_1 -> real_2 is a plausible speed
@@ -600,8 +600,8 @@ def test_warn_on_failed_test_probes_falls_back_to_each_casts_own_voyage(caplog):
 
 
 def test_casts_are_qcd_in_launch_time_order_regardless_of_input_order():
-    early = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=147.0)
-    late = _cast(launch_time=datetime(2025, 3, 1, 13, 0, 0), latitude=-42.1, longitude=147.0)
+    early = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    late = _cast(launch_time=datetime(2025, 3, 1, 13, 0, 0), latitude=-42.1, longitude=149.0)
     results = apply_qc([late, early])  # deliberately out of order
     assert [qc.cast.launch_time for qc in results] == [early.launch_time, late.launch_time]
 
@@ -814,3 +814,40 @@ def test_wire_break_cascade_check_also_runs_on_test_probe_casts():
     )
     [qc] = apply_qc([cast])
     assert "WB" in [h.qc_flag for h in qc.history]
+
+
+def test_launch_position_on_land_gets_a_pl_entry_and_downgraded_lat_lon():
+    cast = _cast(latitude=-42.8806, longitude=147.3250)  # Hobart, Tasmania -- on land
+    [qc] = apply_qc([cast])
+    pl_entries = [h for h in qc.history if h.qc_flag == "PL"]
+    assert len(pl_entries) == 1
+    assert "test 1.4" in pl_entries[0].qc_flag_description
+    assert qc.latitude_qc == GTSPP_PROBABLY_BAD
+    assert qc.longitude_qc == GTSPP_PROBABLY_BAD
+
+
+def test_launch_position_at_sea_gets_no_pl_entry():
+    cast = _cast(latitude=-65.0, longitude=140.0)  # open Southern Ocean
+    [qc] = apply_qc([cast])
+    assert "PL" not in [h.qc_flag for h in qc.history]
+    assert qc.latitude_qc == GTSPP_GOOD
+    assert qc.longitude_qc == GTSPP_GOOD
+
+
+def test_launch_position_on_land_does_not_touch_temp_or_depth():
+    cast = _cast(latitude=-42.8806, longitude=147.3250)
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+    assert np.all(qc.depth_qc == GTSPP_GOOD)
+
+
+def test_already_out_of_range_latitude_is_not_also_flagged_pl():
+    cast = _cast(latitude=200.0, longitude=147.0)
+    [qc] = apply_qc([cast])
+    assert "PL" not in [h.qc_flag for h in qc.history]
+
+
+def test_position_on_land_check_also_applies_to_test_probe_casts():
+    cast = _cast(serial_number="TestProbe", latitude=-42.8806, longitude=147.3250)
+    [qc] = apply_qc([cast])
+    assert "PL" in [h.qc_flag for h in qc.history]

@@ -12,6 +12,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from global_land_mask import globe
 
 logger = logging.getLogger(__name__)
 
@@ -816,6 +817,40 @@ def _flag_wire_break_cascade(qc: CastQC, now: datetime) -> None:
     ))
 
 
+def _flag_position_on_land(qc: CastQC, now: datetime) -> None:
+    """Flags a cast whose launch position is on land -- GTSPP Real-Time QC
+    Manual (IOC M&G No. 22) test 1.4 "Position on Land". Only evaluates a
+    position the existing LATITUDE/LONGITUDE range check left at
+    GTSPP_GOOD -- matches GTSPP's own prerequisite chain, where test 1.4
+    only runs once test 1.3 ("Impossible Location") hasn't already fired.
+    Uses the `global-land-mask` package (pure numpy, a bundled 1km-
+    resolution land/sea grid, no other dependencies) -- validated against
+    all 368 real historical XBT launch positions before shipping (zero
+    false positives, see this check's own design spec). Matches GTSPP's
+    own consequence: only LATITUDE/LONGITUDE are downgraded, since a
+    position error doesn't invalidate what was physically measured, only
+    where it claims to have been measured -- TEMP/DEPTH/SOUND_VELOCITY are
+    untouched. Applied to every cast, real or test-probe, same as every
+    other physical-plausibility check."""
+    if qc.latitude_qc != GTSPP_GOOD or qc.longitude_qc != GTSPP_GOOD:
+        return
+    if not globe.is_land(qc.cast.latitude, qc.cast.longitude):
+        return
+    qc.latitude_qc = GTSPP_PROBABLY_BAD
+    qc.longitude_qc = GTSPP_PROBABLY_BAD
+    qc.history.append(HistoryEntry(
+        institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+        software_release=_SOFTWARE_RELEASE, date=now, parameter="LATITUDE,LONGITUDE",
+        start_depth=float(qc.cast.depth_m[0]) if qc.cast.depth_m.size else 0.0,
+        stop_depth=float(qc.cast.depth_m[-1]) if qc.cast.depth_m.size else 0.0,
+        qc_flag="PL",
+        qc_flag_description=(
+            f"Launch position ({qc.cast.latitude}, {qc.cast.longitude}) is on land "
+            "(GTSPP Real-Time QC Manual test 1.4)"
+        ),
+    ))
+
+
 def apply_qc(casts: list) -> list:
     """Applies every automated QC check to a voyage's casts (see
     QC_COOKBOOK.md for the full list -- not repeated here as a count, since
@@ -844,6 +879,17 @@ def apply_qc(casts: list) -> list:
     _remove_surface_spike's docstring) or the first two, and emits at most
     10 (TP + both SP checks + WB + up to 6 RC). Keep
     build_xbt_netcdf._N_HISTORY at or above that ceiling.
+
+    The Position on Land check (PL, added since NDO-704) does NOT raise
+    this ceiling, despite being a genuinely independent 14th check: it
+    only fires when LATITUDE_qc/LONGITUDE_qc are both still GTSPP_GOOD,
+    which requires BOTH the speed check (PE/TE) and the LATITUDE/LONGITUDE
+    range check to not have already fired on this cast -- those are
+    already 3 of the 13 slots counted above. A cast can reach 13 total
+    entries via PE+TE+LAT-RC+LON-RC (4 of the 13, PL excluded), or it can
+    have a genuinely on-land launch position and pick up PL (1 entry,
+    replacing what would otherwise be 0-4 position-related entries) --
+    never both at once, so the true combined ceiling stays at 13.
     """
     ordered = sorted(casts, key=lambda cast: cast.launch_time)
     now = datetime.utcnow()
@@ -994,6 +1040,7 @@ def apply_qc(casts: list) -> list:
         qc.longitude_qc = _flag_scalar_out_of_range(
             qc, qc.longitude_qc, cast.longitude,
             LONGITUDE_VALID_MIN, LONGITUDE_VALID_MAX, "LONGITUDE", "degrees_east", now)
+        _flag_position_on_land(qc, now)
 
         results.append(qc)
 
