@@ -26,7 +26,7 @@ running against real data, not by inspection.
 - [Checks at a glance](#checks-at-a-glance)
 - [Checks implemented](#checks-implemented)
   - [Test Probe detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else)
-  - [Surface Spikes — CS](#surface-spikes--cs-v11-section-21)
+  - [Surface Transients — CS](#surface-transients--cs-v21-section-431-supersedes-v11-section-21s-csa)
   - [Isolated readings with no real neighbours — SP](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes)
   - [Wire Break cascade — WB](#wire-break-cascade--wb-v11-section-32)
   - [Neighbour-average Spikes retest — SP](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)
@@ -65,8 +65,8 @@ own, independent of `HISTORY_QC_FLAG`.
 |---|---|---|---|---|---|
 | — | [Test Probe detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else) | All casts | Excludes self-test casts from output | `FAULT_TEST_PROBE` | ✅ Implemented (gate) |
 | TP | ↳ failed self-test | Self-test casts only | Warning logged, not a QC flag | `FAULT_TEST_PROBE` | ✅ Implemented |
-| CS (Accept / CSA) | [Surface Spikes](#surface-spikes--cs-v11-section-21) | Real casts | TEMP → missing above 3.7 m | none | ✅ Implemented |
-| CS (Reject / CSR) | ↳ transient below 3.7 m | — | — | — | ❌ Not implemented — needs operator judgement |
+| CS | [Surface Transients](#surface-transients--cs-v21-section-431-supersedes-v11-section-21s-csa) | Real casts | TEMP → probably bad above 3.6 m, value retained | none | ✅ Implemented (current v2.1 methodology since NDO-729 — was shipping deprecated v1.1 CSA, [details](#surface-transients--cs-v21-section-431-supersedes-v11-section-21s-csa)) |
+| CS (Reject / CSR) | ↳ transient below 3.6 m | — | — | — | ❌ Not implemented — needs operator judgement |
 | SP | [Isolated readings](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes) (zero real neighbours) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (narrowed scope) |
 | WB | [Wire Break cascade](#wire-break-cascade--wb-v11-section-32) (unrecovered NaN run at cast end) | All casts, incl. self-test | Audit trail only — no `_qc` change | none | ✅ Implemented |
 | SP | ↳ [neighbour-average "Spikes" formula, at GTSPP's 2.0°C threshold](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented — simplified formula, deliberately not GTSPP's literal two-term one (NDO-727, [details](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)) |
@@ -101,29 +101,56 @@ as a recorder-health alarm ("repeated failures can indicate poor earthing
 or other system errors"), not a per-profile data flag, so it has to surface
 somewhere other than a QC flag nobody downstream will ever read.
 
-### Surface Spikes — CS (v1.1 section 2.1)
+### Surface Transients — CS (v2.1 section 4.3.1, supersedes v1.1 section 2.1's CSA)
 
-**Status:** Implemented — Accept (CSA) case only.
+**Status:** Implemented, at the current (v2.1) methodology — **corrected 2026-09-11 (NDO-729)
+after this pipeline shipped the wrong one for its whole history.** If you're extending this
+check, read this whole section: it's a worked example of the exact "validate against real data,
+don't trust a citation you haven't re-checked" discipline this document asks of every other
+threshold, this time applied to a whole check's *methodology*, not just a number.
 
-> "Surface spikes are caused by a minor start-up transient problem that
-> leads to inaccurate temperature measurements in the top few metres... The
-> CSA flag is applied to all XBT profiles in which the surface spike is
-> undetectable below 3.7 m depth, as the start-up transient problem is
-> ubiquitous... Surface data is removed to 3.7 m depth and replaced with
-> 99.99 to indicate no data."
+**What this pipeline used to do, and why it was wrong.** v1.1 (1994) describes the CSA (Accept)
+code: "Surface data is removed to 3.7 m depth and replaced with 99.99 to indicate no data." This
+pipeline implemented exactly that — for its whole history, until NDO-729 — permanently deleting
+every real TEMP reading above the surface-spike depth on every real cast. That methodology is
+**deprecated**. Quoted directly from v2.1 section 4.3.1 (Cowley & Krummel, CSIRO, 2022):
 
-Applied unconditionally to every real (non-test-probe) cast: TEMP above
-**3.7 m** is set to `NaN` (→ `GTSPP_MISSING` once written). Not a per-cast
-judgement call — the cookbook's own framing is that this is universal
-housekeeping, not a defect being flagged.
+> "The CS Accept code is no longer in use... Since 2020/2021, the Australian QC group elected to
+> retain the temperature surface values and apply a GTSPP flag 3 (Reject) to the surface
+> transients from the surface to 3.6m. For historical Australian XBT data, the temperature data
+> will be retrieved and GTSPP flag 3 applied retrospectively as profiles prior to 2020 are
+> re-processed."
+
+**What this pipeline does now.** Applied unconditionally to every real (non-test-probe) cast:
+TEMP above **3.6 m** (not 3.7 m — see below) is flagged `GTSPP_PROBABLY_BAD` (matching v2.1's
+GTSPP flag 3). The real value is **kept**, not deleted — it reaches every downstream check and
+the published NetCDF unchanged. A shallow sample that's genuinely missing for an unrelated
+reason (e.g. a `-99` sentinel) stays `GTSPP_MISSING`, not promoted to `PROBABLY_BAD` just because
+it's also shallow. `DEPTH_VALUES` is untouched in both editions' methodology.
+
+**Why 3.6 m, not 3.7 m.** v1.1's own text is internally ambiguous — it uses both 3.7 m and 3.9 m
+in different places, "perhaps due to a mix of probe types" (v2.1's own words, describing the
+1994 document). v2.1 resolves this to a single standard: 3.6 m.
+
+**Real-data validation before shipping the fix**, per this document's own discipline: since this
+check used to mutate raw data *before* every other TEMP check ran, none of them had ever seen a
+real shallow value in this pipeline's history. Checked against the real 369-cast archive before
+assuming un-masking was safe: 2,214 real shallow samples were being destroyed (physically sane
+distribution, -1.92°C to 37.06°C, zero range-check violations among them); simulating the
+un-masking against the neighbour-average spike test produced 375 new flags, every one of them
+*inside* the region this check itself already flags (the classic transient shape — an
+erroneously hot first reading rapidly settling, e.g. 24°C → 14°C → 12°C) — zero spillover into
+genuinely deeper, previously-good data. Confirmed again after deploying the real fix: exactly
+2,214 samples recovered, and the neighbour-average spike test's own real-archive flag count
+(112 profiles) is unchanged from before this fix — the "new" flags found during design were
+already accounted for, not a regression introduced by shipping it.
 
 #### Not implemented: CSR (Reject variant)
 
-The Reject variant (CSR — the transient detected *below* 3.7 m and judged
-to actually affect the data) isn't implemented. Distinguishing that from
-real near-surface thermal structure needs the same kind of operator
-judgement call the cookbook itself requires to disambiguate PE from TE
-(next section) — this pipeline doesn't have that input.
+The Reject variant (CSR — the transient detected *below* 3.6 m and judged to actually affect the
+data) isn't implemented in either methodology. Distinguishing that from real near-surface thermal
+structure needs the same kind of operator judgement call the cookbook itself requires to
+disambiguate PE from TE (next section) — this pipeline doesn't have that input.
 
 ### Isolated readings with no real neighbours — SP (v1.1 sections 3.2 "Wire Break" and 3.3 "Spikes")
 
@@ -366,7 +393,7 @@ be checked against each other without reading the source.
 | `TEST_PROBE_ISOTHERMAL_TOLERANCE_C` | ±0.15°C | Test Probe detection | Cookbook signature, v1.1 §2.2 |
 | `TEST_PROBE_ISOTHERMAL_MIN_FRACTION` | 0.5 (half the cast) | Test Probe detection | Cookbook signature, v1.1 §2.2 |
 | `TEST_PROBE_MAX_TEMPERATURE_VARIATION_C` | 0.005°C | Failed self-test warning (TP) | Cookbook, v1.1 §2.2 |
-| `SURFACE_SPIKE_DEPTH_M` | 3.7 m | Surface Spikes (CS) | Cookbook, v1.1 §2.1 |
+| `SURFACE_TRANSIENT_DEPTH_M` | 3.6 m | Surface Transients (CS) | Cookbook v2.1 §4.3.1 — resolves v1.1's own internal 3.7/3.9 m ambiguity |
 | `MAX_PLAUSIBLE_SPEED_KNOTS` | 25.0 kn | Speed check (PE/TE) | Cookbook, v1.1 §4.2.4/4.2.5 |
 | `TEMP_VALID_MIN` / `TEMP_VALID_MAX` | −2.5°C / 40.0°C | Range check (RC), depths < 1500 m | Cookbook/GTSPP convention |
 | `TEMP_DEEP_BAND_DEPTH_M` | 1500.0 m | Range check (RC) — depth-band boundary | Real-data statistical gap, this ship's own archive (see [above](#temp-is-depth-banded-not-one-flat-range-v11-section-24-profile-envelope)) |
@@ -520,14 +547,19 @@ but worth checking before attempting the same approach there.
 
 ## Open questions
 
-- Whether the 2022 edition (v2.1) retired or consolidated any of the 1994
-  edition's ~30 flag categories (Appendix A), and whether it revises the
-  3.7 m surface-spike depth used above — unresolved as of this writing; a
-  question is out to one of the 2022 edition's co-authors. (The 0.2°C
-  neighbour-average threshold this question used to also cover is no
-  longer open in the same sense — this pipeline now ships GTSPP's own 2.0°C
-  figure for that check instead of the cookbook's, so a 2022-edition
-  revision to 0.2°C specifically wouldn't change what's shipped either way.)
+- **Resolved 2026-09-11 (NDO-729):** whether the 2022 edition (v2.1) revises the surface-spike
+  depth, and whether it retired or consolidated any 1994-edition codes — yes, on both counts, and
+  materially. v2.1 both revises the depth (3.7/3.9 m's own internal ambiguity resolved to 3.6 m)
+  *and* retires the entire CSA methodology this pipeline used to implement (destroying the
+  surface data) in favour of flagging it instead — see the [Surface
+  Transients](#surface-transients--cs-v21-section-431-supersedes-v11-section-21s-csa) section
+  above for the fix. v2.1's own "Historical QC codes no longer used" section (4.8) lists the
+  broader set of 1994-era codes it retired — not yet cross-checked against this pipeline's other
+  citations one by one; worth doing if another check's methodology is ever in question the way
+  this one was. (The 0.2°C neighbour-average threshold question this entry used to also cover was
+  already resolved separately — this pipeline ships GTSPP's own 2.0°C figure for that check
+  instead of the cookbook's, so a 2022-edition revision to 0.2°C specifically wouldn't change what
+  ships either way.)
 - "Wire Stretch" and the multi-point "severe spiking... over a wide range
   of depths" case (v1.1 section 3.3, Reject code SPR) are both real,
   found-in-practice fault shapes with no *dedicated* automated check yet —
