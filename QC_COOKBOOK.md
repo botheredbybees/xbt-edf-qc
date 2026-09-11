@@ -145,6 +145,21 @@ genuinely deeper, previously-good data. Confirmed again after deploying the real
 (112 profiles) is unchanged from before this fix — the "new" flags found during design were
 already accounted for, not a regression introduced by shipping it.
 
+**Bonus find while deploying: this fix also recovers one entire real cast that this pipeline had
+been wrongly excluding for its whole history**, via a second, independent interaction with
+`is_test_probe_cast()`'s data-driven isothermal-near-1.5°C signal. That signal looks at the
+*first non-`NaN`* sample, not literally index 0 — under the old destroy-the-shallow-data
+methodology, a real cast's true surface reading could be masked away, leaving the "first
+surviving" sample to be whatever the check happens to see below 3.7 m. For
+`202425VT1_TDB_20241009000411.edf`: the true surface is a real -0.03°C reading (with a brief,
+genuine transient spike to 11.78°C at 0.68 m before settling), followed by a real, cold,
+near-isothermal ~1.49°C water column from 1.37 m onward — a real polar layer, not a test probe.
+Under the old methodology, masking deleted the -0.03°C surface value, leaving the isothermal
+~1.49°C layer as the "first surviving" sample — which coincidentally matched the test-probe
+signature closely enough to wrongly exclude this genuine cast from the published archive.
+Confirmed this is the *only* cast in the archive affected (checked systematically, not assumed)
+before trusting the archive's profile count changing from 368 to 369 after this fix.
+
 #### Not implemented: CSR (Reject variant)
 
 The Reject variant (CSR — the transient detected *below* 3.6 m and judged to actually affect the
