@@ -117,31 +117,31 @@ def test_history_previous_value_is_always_the_fill():
 
 
 def test_n_history_capacity_covers_the_worst_case_cast():
-    # This specific fixture produces exactly 11 real entries: CS from
-    # the surface-spike check (fires here because depth_m includes points
-    # below 3.7 m), PE + TE from the speed check, PR from the probe-type
-    # check, RC once each for TEMP, DEPTH, SOUND_VELOCITY, LATITUDE and
-    # LONGITUDE all independently out of range, SP from the isolated-spike
-    # check -- CS's masking leaves the 999.0 reading stranded between two
-    # NaNs, which the isolated-spike check flags as uncorroborated on its
-    # own (and which the neighbour-average spike check, added since
-    # NDO-708, does NOT also flag -- it needs two real neighbours to
-    # compute an average from, and both of this reading's neighbours are
-    # NaN after CS) -- and WB from the Wire Break cascade check (added
-    # since NDO-728): CS's masking also leaves the cast's own last sample
-    # (depth 2.0 m, below the 3.7 m surface-spike depth) as an unrecovered
-    # trailing NaN, which is exactly the shape WB looks for. _N_HISTORY
-    # itself is 13 (not 11), for headroom covering the true theoretical
-    # worst case across all checks (e.g. a cast whose TEMP goes out of
-    # range in both depth bands AND triggers both spike checks AND ends
-    # in an unrecovered NaN run) -- this fixture doesn't hit that ceiling,
-    # so the two trailing slots are the fixed-width array's own
-    # empty-string padding, not a missing finding.
+    # This specific fixture produces exactly 11 real entries: CS from the
+    # surface-transient check (fires here because depth_m includes points
+    # below 3.6 m -- since NDO-729, CS flags shallow TEMP rather than
+    # destroying it, so the fixture's shallow points are given directly as
+    # NaN below, not left for CS itself to null out), PE + TE from the
+    # speed check, PR from the probe-type check, RC once each for TEMP,
+    # DEPTH, SOUND_VELOCITY, LATITUDE and LONGITUDE all independently out
+    # of range, SP from the isolated-spike check (the 999.0 reading is
+    # given directly stranded between two NaNs, which it flags as
+    # uncorroborated on its own -- the neighbour-average spike check, added
+    # since NDO-708, does NOT also flag it, since it needs two real
+    # neighbours to compute an average from) -- and WB from the Wire Break
+    # cascade check (added since NDO-728): the cast's own last sample is
+    # given directly as an unrecovered trailing NaN, which is exactly the
+    # shape WB looks for. _N_HISTORY itself is 13 (not 11), for headroom
+    # covering the true theoretical worst case across all checks (e.g. a
+    # cast whose TEMP goes out of range in both depth bands AND triggers
+    # both spike checks AND ends in an unrecovered NaN run) -- this fixture
+    # doesn't hit that ceiling, so the two trailing slots are the
+    # fixed-width array's own empty-string padding, not a missing finding.
     first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
     second = _cast(
         launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=95.0, longitude=185.0,
         probe_type_raw="NotARealProbe", probe_type="NotARealProbe",
-        temperature_c=np.array([10.0, 999.0, 10.0]),
+        temperature_c=np.array([np.nan, 999.0, np.nan]),
         depth_m=np.array([0.0, 5000.0, 2.0]),
         sound_velocity_ms=np.array([1500.0, 100.0, 1500.0]),
     )

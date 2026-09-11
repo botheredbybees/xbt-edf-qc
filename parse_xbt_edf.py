@@ -309,28 +309,43 @@ TEMP_DEEP_VALID_MAX = 20.0
 # formula).
 SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C = 2.0
 
-# CSIRO Marine Laboratories Report 221, "Quality Control Cookbook for XBT
-# Data" v1.1 (Bailey, Gronell, Phillips, Tanner & Meyers, 1994), section 2.1
-# "Surface Spikes (CS)": "Surface spikes are caused by a minor start-up
-# transient problem that leads to inaccurate temperature measurements in the
-# top few metres of a temperature profile." Accept code CSA: "applied to all
-# XBT profiles in which the surface spike is undetectable below 3.7 m depth,
-# as the start-up transient problem is ubiquitous ... Surface data is removed
-# to 3.7 m depth and replaced with 99.99 to indicate no data. No change to
-# the class of data." Applied unconditionally to every real (non-test-probe)
-# cast -- found 2026-09-08 when a sample voyage built for an external
-# reviewer had a 37 degC reading at 0 m depth in Southern Ocean water,
-# published as GTSPP flag 1 ("good") because it sat inside TEMP's 40 degC
-# range-check ceiling with nothing else checking for it.
+# CSIRO's XBT QC cookbook has two editions with materially different
+# guidance here, and this pipeline used to implement the WRONG (superseded)
+# one. v1.1 (Bailey, Gronell, Phillips, Tanner & Meyers, 1994, CSIRO Marine
+# Laboratories Report 221), section 2.1 "Surface Spikes (CS)", Accept code
+# CSA: "Surface data is removed to 3.7 m depth and replaced with 99.99 to
+# indicate no data." That is what this pipeline originally implemented --
+# and it is deprecated. v2.1 (Cowley & Krummel, CSIRO, 2022, Report
+# EP2022-1825), section 4.3.1, quoted directly: "The CS Accept code is no
+# longer in use ... Since 2020/2021, the Australian QC group elected to
+# retain the temperature surface values and apply a GTSPP flag 3 (Reject) to
+# the surface transients from the surface to 3.6m. For historical Australian
+# XBT data, the temperature data will be retrieved and GTSPP flag 3 applied
+# retrospectively as profiles prior to 2020 are re-processed." Found
+# 2026-09-11 by reading both real cookbook PDFs directly rather than trusting
+# an earlier session's paraphrase of v1.1 alone -- fixed under NDO-729 (see
+# this check's own design spec for the real-data investigation confirming no
+# downstream check is destabilised by keeping this data instead of destroying
+# it). 3.6 m (not 3.7 m) is v2.1's own resolution of an ambiguity in the 1994
+# text, which used both 3.7 m and 3.9 m in different places "perhaps due to a
+# mix of probe types."
 #
-# The Reject variant (CSR, when the transient is detectable below 3.7 m and
+# Found 2026-09-08, independent of the methodology question above: a sample
+# voyage built for an external reviewer had a 37 degC reading at 0 m depth in
+# Southern Ocean water, published as GTSPP flag 1 ("good") under the OLD
+# methodology's own bug (the removal step wasn't wired in yet) because it sat
+# inside TEMP's 40 degC range-check ceiling with nothing else checking for
+# it -- this is the incident that got Surface Spikes/Transients implemented
+# as a check at all, not evidence for either edition's specific methodology.
+#
+# The Reject variant (CSR, when the transient is detectable below 3.6 m and
 # judged to actually affect data quality) is deliberately NOT implemented:
 # telling a genuine deeper transient apart from real near-surface thermal
 # structure needs the same kind of operator judgement call the cookbook
 # itself requires to disambiguate PE from TE (section 4.1 step 9), which an
 # automated check cannot make -- see the PE/TE handling in apply_qc() for the
 # same reasoning applied elsewhere in this module.
-SURFACE_SPIKE_DEPTH_M = 3.7
+SURFACE_TRANSIENT_DEPTH_M = 3.6
 
 # CSIRO Marine Laboratories Report 221, "Quality Control Cookbook for XBT
 # Data" v1.1 (Bailey, Gronell, Phillips, Tanner & Meyers, 1994), section 3.3
@@ -619,22 +634,34 @@ def _flag_scalar_out_of_range(qc: CastQC, current_flag: int, value: float,
     return GTSPP_PROBABLY_BAD
 
 
-def _remove_surface_spike(cast: Cast) -> None:
-    """Blanks TEMP to NaN above SURFACE_SPIKE_DEPTH_M.
-
-    See SURFACE_SPIKE_DEPTH_M's own comment for the cookbook citation and why
-    only the Accept (CSA) case is implemented. Mutates cast.temperature_c in
-    place, matching the cookbook's own action ("removed ... and replaced with
-    99.99 to indicate no data") -- this reuses the same NaN-then-flag-missing
-    convention CastQC.__post_init__ already applies to the EDF's -99 fault
-    sentinel, rather than duplicating it: setting the value to NaN here is
-    enough for that existing logic to flag it TEMP_quality_control=GTSPP_MISSING
-    on its own once CastQC wraps this cast. Only TEMP is touched: DEPTH_VALUES
-    comes from elapsed time and the probe's fall-rate model, not the
-    thermistor, so it isn't affected by the same start-up transient.
-    """
-    shallow = cast.depth_m < SURFACE_SPIKE_DEPTH_M
-    cast.temperature_c[shallow] = np.nan
+def _flag_surface_transient(qc: CastQC, now: datetime) -> None:
+    """Flags real TEMP data above SURFACE_TRANSIENT_DEPTH_M as probably bad,
+    without destroying it. See SURFACE_TRANSIENT_DEPTH_M's own comment for
+    the cookbook citation and why only the Accept case is implemented, and
+    why the value is kept now (v2.1 methodology) rather than deleted (the
+    deprecated v1.1 CSA methodology this pipeline used to implement -- see
+    this check's own design spec, NDO-729, for the real-data investigation
+    behind the change). cast.temperature_c is never mutated by this check --
+    real values reach every downstream check and the published NetCDF
+    unchanged. Only TEMP is touched: DEPTH_VALUES comes from elapsed time and
+    the probe's fall-rate model, not the thermistor, so it isn't affected by
+    the same start-up transient."""
+    shallow = qc.cast.depth_m < SURFACE_TRANSIENT_DEPTH_M
+    if not np.any(shallow):
+        return
+    qc.temperature_qc[shallow] = GTSPP_PROBABLY_BAD
+    qc.temperature_qc[np.isnan(qc.cast.temperature_c)] = GTSPP_MISSING
+    qc.history.append(HistoryEntry(
+        institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+        software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+        start_depth=0.0, stop_depth=SURFACE_TRANSIENT_DEPTH_M,
+        qc_flag="CS",
+        qc_flag_description=(
+            f"Surface transient: TEMP data above {SURFACE_TRANSIENT_DEPTH_M} m "
+            "flagged probably bad, value retained (CSIRO XBT QC Cookbook "
+            "v2.1 section 4.3.1)"
+        ),
+    ))
 
 
 def _flag_temperature_out_of_depth_band_range(qc: CastQC, now: datetime) -> None:
@@ -875,8 +902,8 @@ def apply_qc(casts: list) -> list:
     RC entries on the same cast). None of these are mutually exclusive --
     each fires from a different part of the profile or a different
     variable, so a sufficiently pathological real cast can trigger all 13
-    at once. A test probe cast never reaches the surface-spike check (see
-    _remove_surface_spike's docstring) or the first two, and emits at most
+    at once. A test probe cast never reaches the surface-transient check (see
+    _flag_surface_transient's docstring) or the first two, and emits at most
     10 (TP + both SP checks + WB + up to 6 RC). Keep
     build_xbt_netcdf._N_HISTORY at or above that ceiling.
 
@@ -898,24 +925,11 @@ def apply_qc(casts: list) -> list:
 
     for cast in ordered:
         is_test_probe = is_test_probe_cast(cast)
-        if not is_test_probe:
-            _remove_surface_spike(cast)
 
         qc = CastQC(cast=cast)
 
         if not is_test_probe:
-            if np.any(cast.depth_m < SURFACE_SPIKE_DEPTH_M):
-                qc.history.append(HistoryEntry(
-                    institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
-                    software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
-                    start_depth=0.0, stop_depth=SURFACE_SPIKE_DEPTH_M,
-                    qc_flag="CS",
-                    qc_flag_description=(
-                        f"Surface spike: start-up transient TEMP data above "
-                        f"{SURFACE_SPIKE_DEPTH_M} m removed (CSIRO XBT QC Cookbook "
-                        "v1.1 section 2.1, Accept code CSA)"
-                    ),
-                ))
+            _flag_surface_transient(qc, now)
 
             if previous_real_cast is not None:
                 speed_knots = _speed_between_casts_knots(previous_real_cast, cast)

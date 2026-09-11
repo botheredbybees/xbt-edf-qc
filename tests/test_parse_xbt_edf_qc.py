@@ -45,7 +45,7 @@ def _cast(**overrides):
         longitude=149.0,
         serial_number="123",
         voyage_id="202425030",
-        # Beyond SURFACE_SPIKE_DEPTH_M (3.7 m) so the surface-spike check
+        # Beyond SURFACE_TRANSIENT_DEPTH_M (3.6 m) so the surface-transient check
         # (tested separately below) doesn't incidentally fire on every other
         # test that uses this default.
         depth_m=np.array([10.0, 11.0, 12.0]),
@@ -156,8 +156,8 @@ def test_probe_type_error_downgrades_both_temperature_and_depth():
 def test_probe_type_downgrade_preserves_missing_flags():
     cast = _cast(
         probe_type_raw="NotARealProbe", probe_type="NotARealProbe",
-        # Depths kept beyond SURFACE_SPIKE_DEPTH_M so this test's own missing
-        # flag isn't confused with the separate surface-spike check.
+        # Depths kept beyond SURFACE_TRANSIENT_DEPTH_M so this test's own missing
+        # flag isn't confused with the separate surface-transient check.
         depth_m=np.array([10.0, np.nan, 12.0]),
         temperature_c=np.array([10.0, 10.0, np.nan]),
     )
@@ -257,34 +257,46 @@ def test_latitude_and_longitude_within_range_never_get_an_rc_entry():
     assert "RC" not in [e.qc_flag for e in qc.history]
 
 
-def test_surface_spike_removes_shallow_temperature():
-    # Real shape found 2026-09-08: a spurious high reading right at the
-    # surface, settling to a physically realistic profile within a couple of
-    # metres -- the classic start-up transient the cookbook's CSA code exists
-    # for, not a genuine warm surface layer.
-    from parse_xbt_edf import SURFACE_SPIKE_DEPTH_M
+def test_surface_transient_flags_shallow_temperature_without_destroying_it():
+    # A modest, smoothly-settling start-up transient -- close enough
+    # together that it doesn't also incidentally trip the (separately
+    # tested) neighbour-average spike check, which isn't what this test is
+    # about. Real shallow transients settle just like this in the archive
+    # (see this check's own design spec's real-data investigation); the
+    # point is that the current (v2.1, since 2020/2021) methodology KEEPS
+    # these values and flags them, rather than destroying them the way the
+    # deprecated v1.1 CSA code did.
     cast = _cast(
         depth_m=np.array([0.0, 1.0, 3.6, 3.7, 5.0]),
-        temperature_c=np.array([37.0, 6.0, -0.3, -0.5, -0.5]),
+        temperature_c=np.array([10.0, 5.0, 2.0, 1.8, 1.8]),
     )
     [qc] = apply_qc([cast])
     assert list(qc.temperature_qc) == [
-        GTSPP_MISSING, GTSPP_MISSING, GTSPP_MISSING, GTSPP_GOOD, GTSPP_GOOD,
+        GTSPP_PROBABLY_BAD, GTSPP_PROBABLY_BAD, GTSPP_GOOD, GTSPP_GOOD, GTSPP_GOOD,
     ]
-    # The cookbook's own action is "removed ... replaced with ... no data",
-    # not just flagged -- the raw value must actually be gone, not merely
-    # marked bad while still publishable.
-    assert np.isnan(cast.temperature_c[0])
-    assert np.isnan(cast.temperature_c[1])
-    assert np.isnan(cast.temperature_c[2])
-    assert cast.temperature_c[3] == pytest.approx(-0.5)
-    assert cast.temperature_c[4] == pytest.approx(-0.5)
-    assert SURFACE_SPIKE_DEPTH_M == 3.7
+    # The value itself must survive -- this check flags, it does not correct
+    # or delete, matching every other check in this pipeline.
+    assert cast.temperature_c[0] == pytest.approx(10.0)
+    assert cast.temperature_c[1] == pytest.approx(5.0)
+    assert cast.temperature_c[2] == pytest.approx(2.0)
 
 
-def test_surface_spike_check_only_touches_temperature():
+def test_surface_transient_leaves_a_genuinely_missing_shallow_value_as_missing():
+    # A shallow sample that's NaN for an unrelated reason (e.g. a -99
+    # sentinel already converted to NaN) must stay GTSPP_MISSING, not get
+    # promoted to GTSPP_PROBABLY_BAD just because it's also shallow.
+    cast = _cast(
+        depth_m=np.array([0.0, 1.0, 5.0]),
+        temperature_c=np.array([37.0, np.nan, -0.5]),
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [GTSPP_PROBABLY_BAD, GTSPP_MISSING, GTSPP_GOOD]
+
+
+def test_surface_transient_check_only_touches_temperature():
     # DEPTH_VALUES comes from elapsed time and the fall-rate model, not the
-    # thermistor -- the same start-up transient doesn't affect it.
+    # thermistor -- the same start-up transient doesn't affect it. TEMP
+    # itself must also be unchanged now (this check no longer mutates data).
     cast = _cast(
         depth_m=np.array([0.0, 1.0, 5.0]),
         temperature_c=np.array([37.0, 6.0, -0.5]),
@@ -294,28 +306,28 @@ def test_surface_spike_check_only_touches_temperature():
     assert np.all(qc.depth_qc == GTSPP_GOOD)
     assert np.all(qc.sound_velocity_qc == GTSPP_GOOD)
     assert list(cast.depth_m) == [0.0, 1.0, 5.0]
+    assert list(cast.temperature_c) == [37.0, 6.0, -0.5]
 
 
-def test_surface_spike_entry_cites_the_cookbook():
+def test_surface_transient_entry_cites_the_current_cookbook_edition():
     cast = _cast(depth_m=np.array([0.0, 1.0, 5.0]))
     [qc] = apply_qc([cast])
     [entry] = [e for e in qc.history if e.qc_flag == "CS"]
     assert entry.parameter == "TEMP"
-    assert "CSIRO XBT QC Cookbook v1.1 section 2.1" in entry.qc_flag_description
-    assert "CSA" in entry.qc_flag_description
+    assert "CSIRO XBT QC Cookbook v2.1 section 4.3.1" in entry.qc_flag_description
 
 
-def test_surface_spike_not_applied_at_or_beyond_the_threshold_depth():
-    # No sample shallower than SURFACE_SPIKE_DEPTH_M at all -- nothing to
-    # remove, and no CS entry should be recorded.
-    cast = _cast(depth_m=np.array([3.7, 5.0, 10.0]), temperature_c=np.array([-0.5, -0.5, -0.5]))
+def test_surface_transient_not_applied_at_or_beyond_the_threshold_depth():
+    # No sample shallower than SURFACE_TRANSIENT_DEPTH_M (3.6) at all -- no
+    # CS entry, and no flag change.
+    cast = _cast(depth_m=np.array([3.6, 5.0, 10.0]), temperature_c=np.array([-0.5, -0.5, -0.5]))
     [qc] = apply_qc([cast])
     assert np.all(qc.temperature_qc == GTSPP_GOOD)
     assert list(cast.temperature_c) == [-0.5, -0.5, -0.5]
     assert "CS" not in [e.qc_flag for e in qc.history]
 
 
-def test_surface_spike_not_applied_to_test_probe_casts():
+def test_surface_transient_not_applied_to_test_probe_casts():
     # A self-test cast doesn't involve a real probe entering the water, so
     # the physical start-up transient this check exists for doesn't apply --
     # and self-test casts are filtered out of the published NetCDF anyway.
