@@ -33,6 +33,7 @@ running against real data, not by inspection.
   - [Speed check — PE / TE](#speed-check--pe--te-v11-section-424425)
   - [Probe-type check — PR](#probe-type-check--pr-v11-section-426)
   - [Physical-plausibility range check — RC](#physical-plausibility-range-check--rc)
+  - [Position on Land — PL](#position-on-land--pl-gtspp-real-time-qc-manual-test-14)
 - [Constants reference](#constants-reference)
 - [What we tried and rejected](#what-we-tried-and-rejected)
 - [Open questions](#open-questions)
@@ -72,6 +73,7 @@ own, independent of `HISTORY_QC_FLAG`.
 | PE + TE | [Speed check](#speed-check--pe--te-v11-section-424425) | Real casts, vs. previous real cast | LATITUDE/LONGITUDE/TIME/TEMP → probably bad, both codes together | `FAULT_POSITION_ERROR` + `FAULT_TIME_ERROR` | ✅ Implemented (both emitted, can't disambiguate) |
 | PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
 | RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 1500 m — [details](#physical-plausibility-range-check--rc)) |
+| PL | [Position on Land](#position-on-land--pl-gtspp-real-time-qc-manual-test-14) (GTSPP/SeaDataNet/SAMOS, not CSIRO) | All casts, incl. self-test | LATITUDE/LONGITUDE → probably bad | none | ✅ Implemented |
 | — | Wire Stretch (§4.4/4.5) | — | — | — | ❌ Not automated — usually still caught indirectly via `SOUND_VELOCITY` RC ([details](#what-we-tried-and-rejected)) |
 | SPR | Severe multi-point spiking (§3.3) | — | — | — | ❌ Not implemented — see [Open questions](#open-questions) |
 
@@ -319,6 +321,37 @@ archive — the flat bound stays there. Don't reuse the 1500 m/20.0°C figures
 for a different ship or region without re-running this same real-data check
 against that ship's own archive — see [What we tried and
 rejected](#what-we-tried-and-rejected).
+
+### Position on Land — PL (GTSPP Real-Time QC Manual test 1.4)
+
+**Status:** Implemented (NDO-704). **This check's provenance is different from every other
+check in this document** — it does not trace back to the CSIRO XBT QC Cookbook at all. It's
+cited from GTSPP's Real-Time QC Manual (IOC Manuals & Guides No. 22) test 1.4, and two
+independent standards (SeaDataNet QC Procedures v2.0 §4, SAMOS netCDF manual Flag L) specify
+the same check. Read the source text before assuming any check in this pipeline traces to the
+CSIRO cookbook by default.
+
+GTSPP's test 1.4 is, in its original form, a 1990s interactive check — it displays a track
+chart and neighbouring stations for a human operator to confirm before acting. Its terminal
+automated consequence, though, is narrow: when a position is confirmed on land, only the
+latitude/longitude quality flags are set to "doubtful" — the sounding/temperature measurements
+themselves are untouched, since a position error doesn't invalidate what was physically
+measured, only where it claims to have been measured. This pipeline implements exactly that
+consequence, automatically: a cast's launch position on land sets both `LATITUDE_qc` and
+`LONGITUDE_qc` to `GTSPP_PROBABLY_BAD` and appends one `PL` history entry — `TEMP_qc`,
+`DEPTH_qc`, and `SOUND_VELOCITY_qc` are never touched. Test 1.4 also cross-checks a reported
+sounding against known bathymetry (its own rules 1.4.3/1.4.4) — not implemented here, since it
+doesn't map onto XBT's temperature-profile data (not a bathymetric survey). The check only
+evaluates a position the existing LATITUDE/LONGITUDE range check (RC, above) left at
+`GTSPP_GOOD` — matching GTSPP's own prerequisite chain, where test 1.4 only runs once test 1.3
+("Impossible Location") hasn't already fired.
+
+Land/sea determination uses the `global-land-mask` PyPI package: pure numpy, no other
+dependencies, a bundled 1km-resolution global land/sea grid (2.5MB compressed, no runtime
+download). **Validated against all 368 real historical XBT launch positions before shipping**,
+per this document's own real-data discipline — zero false positives, including casts close to
+the Tasmanian coast at voyage start/end. Re-validated against the live production archive after
+deploy: 0 of the same real casts get a `PL` entry, matching the pre-deploy validation exactly.
 
 ## Constants reference
 
