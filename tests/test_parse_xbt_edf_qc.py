@@ -205,16 +205,27 @@ def test_temperature_outside_valid_range_flags_only_the_bad_points():
 
 
 def test_temperature_within_valid_range_never_gets_an_rc_entry():
-    # Middle value is deliberately the average of the two boundary values,
-    # so this exercises only the range check -- a big point-to-point jump
-    # between -2.5 and 40.0 would also trip the (separately tested)
-    # neighbour-average spike check, which isn't what this test is about.
-    cast = _cast(temperature_c=np.array(
-        [TEMP_VALID_MIN, (TEMP_VALID_MIN + TEMP_VALID_MAX) / 2, TEMP_VALID_MAX]
-    ))
+    # A perfectly linear ramp between the two boundary values, spread over
+    # enough points that every step is small -- a single big point-to-point
+    # jump between -2.5 and 40.0 would also trip the (separately tested)
+    # neighbour-average spike check and the terminal-deflection check,
+    # neither of which is what this test is about. Linear spacing keeps
+    # every interior point exactly at its neighbours' average (zero spike
+    # deviation) and every step (~4.7 degC) under the terminal-deflection
+    # threshold.
+    n = 10
+    temps = np.linspace(TEMP_VALID_MIN, TEMP_VALID_MAX, n)
+    cast = _cast(
+        depth_m=np.linspace(10.0, 19.0, n),
+        temperature_c=temps,
+        sound_velocity_ms=np.full(n, 1500.0),
+        elapsed_s=np.linspace(0.0, 0.9, n),
+    )
     [qc] = apply_qc([cast])
     assert np.all(qc.temperature_qc == GTSPP_GOOD)
     assert "RC" not in [entry.qc_flag for entry in qc.history]
+    assert "SP" not in [entry.qc_flag for entry in qc.history]
+    assert "WB" not in [entry.qc_flag for entry in qc.history]
 
 
 def test_depth_outside_valid_range_flags_only_the_bad_points():
@@ -641,7 +652,7 @@ def test_temperature_shallow_band_still_flags_outside_the_flat_bound():
     assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_GOOD]
     [entry] = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
     assert "1 TEMP sample" in entry.qc_flag_description
-    assert "depth < 1500.0" in entry.qc_flag_description
+    assert "depth < 200.0" in entry.qc_flag_description
 
 
 def test_temperature_deep_band_flags_a_value_the_shallow_bound_would_have_passed():
@@ -654,7 +665,7 @@ def test_temperature_deep_band_flags_a_value_the_shallow_bound_would_have_passed
     [qc] = apply_qc([cast])
     assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_GOOD]
     [entry] = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
-    assert "depth >= 1500.0" in entry.qc_flag_description
+    assert "depth >= 200.0" in entry.qc_flag_description
 
 
 def test_temperature_deep_band_at_exactly_the_boundary_depth_uses_the_tighter_bound():
@@ -695,6 +706,35 @@ def test_temperature_both_bands_bad_produces_two_separate_rc_entries():
     assert list(qc.temperature_qc) == [GTSPP_PROBABLY_BAD, GTSPP_PROBABLY_BAD]
 
 
+def test_temperature_mid_depth_fault_plateau_now_flagged_ndo_763():
+    # Regression for NDO-763: a 25-37 degC fault ramp at 200-1400 m used to
+    # publish as GTSPP "good" because the tightened band only started at
+    # 1500 m. Shape modelled on the real archive (e.g. cast 38/19): a smooth
+    # climb from real water into recorder saturation at ~300-400 m.
+    cast = _cast(
+        depth_m=np.array([298.0, 300.0, 302.0, 304.0]),
+        temperature_c=np.array([15.0, 19.0, 25.0, 30.0]),
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [
+        GTSPP_GOOD, GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_PROBABLY_BAD,
+    ]
+    [entry] = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
+    assert "depth >= 200.0" in entry.qc_flag_description
+
+
+def test_temperature_real_water_at_200m_below_tightened_ceiling_stays_good():
+    # The real archive's own highest confirmed-clean value at depth >=200 m
+    # sits close under TEMP_DEEP_VALID_MAX -- this stays good, not a false
+    # positive of the NDO-763 tightening.
+    cast = _cast(
+        depth_m=np.array([200.0, 205.0, 210.0]),
+        temperature_c=np.array([18.0, 19.0, 18.5]),
+    )
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+
+
 def test_neighbour_average_spike_agreeing_neighbours_stays_good():
     cast = _cast(
         depth_m=np.array([10.0, 11.0, 12.0]),
@@ -731,14 +771,19 @@ def test_neighbour_average_spike_exactly_at_threshold_stays_good():
 def test_neighbour_average_spike_one_missing_neighbour_is_not_evaluated():
     # Complementary to _flag_spikes -- that check handles the fully-isolated
     # (both sides missing) case; this one needs BOTH real neighbours to
-    # compute an average at all.
+    # compute an average at all. The trailing 20.0 repeat keeps the jump
+    # across the gap away from the cast's terminal sample, so the
+    # (separately tested) terminal-deflection check doesn't also fire here.
     cast = _cast(
-        depth_m=np.array([10.0, 11.0, 12.0]),
-        temperature_c=np.array([5.0, np.nan, 20.0]),
+        depth_m=np.array([10.0, 11.0, 12.0, 13.0]),
+        temperature_c=np.array([5.0, np.nan, 20.0, 20.0]),
+        sound_velocity_ms=np.array([1500.0, 1500.0, 1500.0, 1500.0]),
+        elapsed_s=np.array([0.0, 0.1, 0.2, 0.3]),
     )
     [qc] = apply_qc([cast])
-    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_MISSING, GTSPP_GOOD]
+    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_MISSING, GTSPP_GOOD, GTSPP_GOOD]
     assert "SP" not in [e.qc_flag for e in qc.history]
+    assert "WB" not in [e.qc_flag for e in qc.history]
 
 
 def test_neighbour_average_spike_catches_a_synthetic_wire_stretch_ramp():
@@ -826,6 +871,73 @@ def test_wire_break_cascade_check_also_runs_on_test_probe_casts():
     )
     [qc] = apply_qc([cast])
     assert "WB" in [h.qc_flag for h in qc.history]
+
+
+def test_terminal_deflection_flags_a_sharp_jump_on_the_casts_last_sample():
+    # Real shape found during NDO-763 (modelled closely on cast 171 in the
+    # historical archive): a long, stable, physically sane reading (real
+    # Antarctic shelf water) followed by one odd intermediate value the
+    # neighbour-average spike check already catches, then a terminal jump
+    # into double digits -- invisible to the depth-band range check when
+    # the jump still lands under TEMP_DEEP_VALID_MAX, and invisible to the
+    # spike check itself since it needs a real neighbour *after* the
+    # terminal sample too.
+    cast = _cast(
+        depth_m=np.array([500.0, 500.6, 501.2, 501.8]),
+        temperature_c=np.array([-1.58, -1.58, 1.61, 19.18]),
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [
+        GTSPP_GOOD, GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_PROBABLY_BAD,
+    ]
+    [entry] = [e for e in qc.history if e.qc_flag == "WB"]
+    assert "20.76 degC" in entry.qc_flag_description  # delta from the last GOOD value (-1.58), not from 1.61
+    assert "section 3.2" in entry.qc_flag_description
+
+
+def test_terminal_deflection_within_threshold_stays_good():
+    # Linear steps (zero spike-check deviation) with the final step exactly
+    # AT the threshold -- the check is strictly "greater than", so this
+    # must not flag.
+    from parse_xbt_edf import TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C as D
+    cast = _cast(
+        depth_m=np.array([500.0, 500.6, 501.2]),
+        temperature_c=np.array([0.0, D, 2 * D]),
+    )
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+    assert "WB" not in [e.qc_flag for e in qc.history]
+
+
+def test_terminal_deflection_skips_over_an_already_bad_immediate_predecessor():
+    # The immediate predecessor is itself already flagged bad (here, by the
+    # depth-band range check -- 40.0 exceeds TEMP_DEEP_VALID_MAX at this
+    # depth) -- comparing the terminal value against it would be
+    # meaningless, so this must fall back to the last CONFIRMED-GOOD value
+    # (10.0) instead. Real analogue: cast 171 in the historical archive,
+    # where the sample right before the terminal deflection was itself
+    # already an artifact.
+    cast = _cast(
+        depth_m=np.array([500.0, 500.6, 501.2, 501.8]),
+        temperature_c=np.array([10.0, np.nan, 40.0, 10.5]),
+    )
+    [qc] = apply_qc([cast])
+    # index 2 (40.0) exceeds the depth-band ceiling -- flagged bad by the
+    # range check, independent of this check.
+    assert qc.temperature_qc[2] == GTSPP_PROBABLY_BAD
+    # index 3 (10.5) is close to the last confirmed-good value (10.0, index 0)
+    # -- must stay good, not be compared against the already-bad 40.0.
+    assert qc.temperature_qc[3] == GTSPP_GOOD
+
+
+def test_terminal_deflection_does_not_double_flag_an_already_bad_terminal_sample():
+    cast = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]),
+        temperature_c=np.array([10.0, 10.0, TEMP_VALID_MAX + 1.0]),
+    )
+    [qc] = apply_qc([cast])
+    wb_entries = [e for e in qc.history if e.qc_flag == "WB"]
+    assert wb_entries == []  # RC already caught it; terminal-deflection must not add a second entry
 
 
 def test_launch_position_on_land_gets_a_pl_entry_and_downgraded_lat_lon():

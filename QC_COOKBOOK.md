@@ -29,6 +29,7 @@ running against real data, not by inspection.
   - [Surface Transients — CS](#surface-transients--cs-v21-section-431-supersedes-v11-section-21s-csa)
   - [Isolated readings with no real neighbours — SP](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes)
   - [Wire Break cascade — WB](#wire-break-cascade--wb-v11-section-32)
+  - [Terminal Deflection — WB](#terminal-deflection--wb-v11-section-32-same-citation-as-wire-break-cascade)
   - [Neighbour-average Spikes retest — SP](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)
   - [Speed check — PE / TE](#speed-check--pe--te-v11-section-424425)
   - [Probe-type check — PR](#probe-type-check--pr-v11-section-426)
@@ -69,10 +70,11 @@ own, independent of `HISTORY_QC_FLAG`.
 | CS (Reject / CSR) | ↳ transient below 3.6 m | — | — | — | ❌ Not implemented — needs operator judgement |
 | SP | [Isolated readings](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes) (zero real neighbours) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (narrowed scope) |
 | WB | [Wire Break cascade](#wire-break-cascade--wb-v11-section-32) (unrecovered NaN run at cast end) | All casts, incl. self-test | Audit trail only — no `_qc` change | none | ✅ Implemented |
+| WB | ↳ [Terminal Deflection](#terminal-deflection--wb-v11-section-32-same-citation-as-wire-break-cascade) (sharp jump on the cast's last real sample) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (NDO-763, [details](#terminal-deflection--wb-v11-section-32-same-citation-as-wire-break-cascade)) |
 | SP | ↳ [neighbour-average "Spikes" formula, at GTSPP's 2.0°C threshold](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented — simplified formula, deliberately not GTSPP's literal two-term one (NDO-727, [details](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)) |
 | PE + TE | [Speed check](#speed-check--pe--te-v11-section-424425) | Real casts, vs. previous real cast | LATITUDE/LONGITUDE/TIME/TEMP → probably bad, both codes together | `FAULT_POSITION_ERROR` + `FAULT_TIME_ERROR` | ✅ Implemented (both emitted, can't disambiguate) |
 | PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
-| RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 1500 m — [details](#physical-plausibility-range-check--rc)) |
+| RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 200 m since NDO-763, previously 1500 m — [details](#physical-plausibility-range-check--rc)) |
 | PL | [Position on Land](#position-on-land--pl-gtspp-real-time-qc-manual-test-14) (GTSPP/SeaDataNet/SAMOS, not CSIRO) | All casts, incl. self-test | LATITUDE/LONGITUDE → probably bad | none | ✅ Implemented |
 | — | Wire Stretch (§4.4/4.5) | — | — | — | ❌ Not automated — usually still caught indirectly via `SOUND_VELOCITY` RC ([details](#what-we-tried-and-rejected)) |
 | SPR | Severe multi-point spiking (§3.3) | — | — | — | ❌ Not implemented — see [Open questions](#open-questions) |
@@ -232,6 +234,45 @@ that gap takes. Every other check in this document is justified by the data and 
 alone; this one's real-world justification also depends on knowing how the crew actually run
 the test, which nothing about the raw EDF file itself can tell you.
 
+### Terminal Deflection — WB (v1.1 section 3.2, same citation as Wire Break cascade)
+
+**Status:** Implemented (NDO-763).
+
+The Wire Break cascade check above only audit-trails a *following* `NaN` run — it never
+changes `temperature_qc`, because every `NaN` sample is already `GTSPP_MISSING` regardless.
+But the cookbook's own text for this fault describes *two* things happening, not one: "a
+sudden deflection to the high or low end of the scale" (the readings going bad) **and then**
+"downgrade data... from depth of initial point of damage" (implying the deflected reading
+itself, not just what follows it, should be downgraded). A cast whose recording simply stops
+right after a deflected reading — no `NaN` tail at all, the EDF file just ends — has nothing
+for the cascade check to find, and the deflected reading itself was landing in the archive as
+`GTSPP_GOOD`.
+
+This gap surfaced during the NDO-763 investigation (below): several real casts have a long,
+physically stable reading (e.g. −1.58°C Antarctic shelf water for hundreds of samples) that
+jumps by double digits on the very last one or two real samples, often right at a probe type's
+rated maximum depth (T-7 at ~760 m; several others near 900-920 m — consistent with the wire
+finally failing at full payout). Invisible to every other check: the neighbour-average spike
+check needs a real sample *after* the point in question to compute a deviation, which a
+cast-ending sample never has; the depth-band range check only catches it if the deflected value
+happens to exceed `TEMP_DEEP_VALID_MAX`, which it doesn't always.
+
+**The fix compares the terminal reading against the last sample still confirmed `GTSPP_GOOD`,
+not simply the immediately preceding real sample** — deliberately, because in most real
+examples found, the sample immediately before the terminal deflection is itself already an
+artifact the neighbour-average spike check caught (a real profile rarely jumps cleanly in one
+step; it usually overshoots through an intermediate bad reading first). Comparing against an
+already-known-bad value would make the "deflection size" meaningless. Validated against the
+full real historical archive: ~100 samples flagged this way, every one individually inspected
+by its cast's full depth/TEMP profile shape, none found to be a real gradient rather than a
+terminal fault.
+
+**5.0°C, unlike `TEMP_DEEP_VALID_MAX`'s 1500 m band, does not have a wide, comfortable margin.**
+The largest terminal deflection found among casts otherwise untouched by any check in this
+pipeline was 4.73°C — and that specific cast turned out to be its own separate, still-uncaught
+shallow-depth (<200 m) fault (see [Open questions](#open-questions)), not confirmed real data.
+Don't lower this threshold without repeating the same full-archive, per-cast validation.
+
 ### Neighbour-average Spikes retest — SP (v1.1 section 3.3 / GTSPP Real-Time QC Manual)
 
 **Status:** Implemented, at GTSPP's 2.0°C threshold rather than the
@@ -343,25 +384,40 @@ for the exact values and where each comes from.
 
 #### TEMP is depth-banded, not one flat range (v1.1 section 2.4 "Profile Envelope")
 
-**Status:** Implemented (NDO-705). TEMP's range check tightens below
-**1500 m**: the flat -2.5..40°C bound still applies above that depth, but
+**Status:** Implemented (NDO-705, tightened NDO-763). TEMP's range check tightens below
+**200 m**: the flat -2.5..40°C bound still applies above that depth, but
 below it the upper bound drops to **20.0°C**. This replaced a single flat
 range check across the whole profile.
 
 The cookbook's own "Profile Envelope" concept — a depth-varying plausible
 range, tighter than the whole-profile bound — was only automated where the
-real historical archive actually supports it. Checked at every depth band
-before picking 1500 m specifically: the deep water this ship actually
-operates in (Southern Ocean, not the tropics the flat 40°C bound is
-sized for) shows a clean statistical gap only from 1500 m down — real data
-tops out at **16.92°C** at that depth and below, while the nearest known
-fault cluster starts at **32.04°C**, a wide enough margin that 20.0°C
-sits safely in between with no risk of catching real structure. Shallower
-than 1500 m, real near-surface/thermocline water genuinely reaches high
-enough temperatures that a tighter bound isn't safe to draw from this
-archive — the flat bound stays there. Don't reuse the 1500 m/20.0°C figures
-for a different ship or region without re-running this same real-data check
-against that ship's own archive — see [What we tried and
+real historical archive actually supports it.
+
+**This band originally started at 1500 m (NDO-705), not 200 m — corrected 2026-09-13
+(NDO-763) after that original decision turned out to rest on a misidentified fault.** NDO-705's
+own justification for leaving 200-1500 m at the flat bound cited "a genuine, smooth 12.12→16.1°C
+rise over 7 m at ~730 m depth" as evidence that real fronts/eddies sit on a continuum with fault
+values in that range. Re-investigated for NDO-763: that example is part of cast 183's fault
+ramp, not real data — nobody had checked it against the fuller fault population that later
+review turned up. Believing it was real is exactly why this band was never tightened, leaving
+~1,452 samples across 106 casts (smooth 25-37°C climbs from real water to recorder saturation,
+200-1400 m) published as GTSPP "good" for as long as this check existed.
+
+Re-investigated properly against the full real historical archive
+(`cron_jobs_on_skippy/xbt_historical_backfill_output/xbt_historical_profiles.nc`): every sample
+currently good at depth ≥200 m with TEMP >20°C belongs to a cast individually confirmed
+fault-affected by inspecting its full depth/TEMP profile shape (a fault is a rapid, near-monotonic
+climb to recorder saturation; nothing resembling a real front/eddy was found there). **Unlike the
+1500 m band's wide, comfortable 16.92°C-to-32.04°C gap, this one is narrow**: no confirmed-clean
+cast in the archive reads above 19.18°C at depth ≥200 m, and even that highest borderline case
+(cast 171) turned out to be a different, previously undetected fault — caught separately by the
+[Terminal Deflection](#terminal-deflection--wb-v11-section-32-same-citation-as-wire-break-cascade)
+check rather than by this band. Shallower than 200 m, real near-surface/thermocline water
+genuinely reaches high enough temperatures (this ship transits through the tropics) that a
+tighter bound isn't safe to draw from this archive — the flat bound stays there, and some
+shallower faults still slip through it (see [Open questions](#open-questions)). Don't reuse the
+200 m/20.0°C figures for a different ship or region, or loosen them for this one, without
+re-running this same full-archive, per-cast validation — see [What we tried and
 rejected](#what-we-tried-and-rejected).
 
 ### Position on Land — PL (GTSPP Real-Time QC Manual test 1.4)
@@ -410,9 +466,10 @@ be checked against each other without reading the source.
 | `TEST_PROBE_MAX_TEMPERATURE_VARIATION_C` | 0.005°C | Failed self-test warning (TP) | Cookbook, v1.1 §2.2 |
 | `SURFACE_TRANSIENT_DEPTH_M` | 3.6 m | Surface Transients (CS) | Cookbook v2.1 §4.3.1 — resolves v1.1's own internal 3.7/3.9 m ambiguity |
 | `MAX_PLAUSIBLE_SPEED_KNOTS` | 25.0 kn | Speed check (PE/TE) | Cookbook, v1.1 §4.2.4/4.2.5 |
-| `TEMP_VALID_MIN` / `TEMP_VALID_MAX` | −2.5°C / 40.0°C | Range check (RC), depths < 1500 m | Cookbook/GTSPP convention |
-| `TEMP_DEEP_BAND_DEPTH_M` | 1500.0 m | Range check (RC) — depth-band boundary | Real-data statistical gap, this ship's own archive (see [above](#temp-is-depth-banded-not-one-flat-range-v11-section-24-profile-envelope)) |
-| `TEMP_DEEP_VALID_MAX` | 20.0°C | Range check (RC), depths ≥ 1500 m | Real-data statistical gap, this ship's own archive — same source as `TEMP_DEEP_BAND_DEPTH_M` |
+| `TEMP_VALID_MIN` / `TEMP_VALID_MAX` | −2.5°C / 40.0°C | Range check (RC), depths < 200 m | Cookbook/GTSPP convention |
+| `TEMP_DEEP_BAND_DEPTH_M` | 200.0 m (was 1500.0 m until NDO-763) | Range check (RC) — depth-band boundary | Real-data statistical gap, this ship's own archive (see [above](#temp-is-depth-banded-not-one-flat-range-v11-section-24-profile-envelope)) — narrow margin, not a wide one; don't loosen without re-validating |
+| `TEMP_DEEP_VALID_MAX` | 20.0°C | Range check (RC), depths ≥ 200 m | Real-data statistical gap, this ship's own archive — same source as `TEMP_DEEP_BAND_DEPTH_M` |
+| `TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C` | 5.0°C | Terminal Deflection (WB) | Real-data validation, this ship's own archive (NDO-763) — narrow margin (4.73°C closest real-ish case, itself a separate uncaught fault), see [above](#terminal-deflection--wb-v11-section-32-same-citation-as-wire-break-cascade) |
 | `SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C` | 2.0°C | Neighbour-average Spikes retest (SP) | GTSPP Real-Time QC Manual (IOC M&G No. 22), not the cookbook's own 0.2°C (rejected — see [below](#what-we-tried-and-rejected)) |
 | `LATITUDE_VALID_MIN` / `_MAX` | −90° / 90° | Range check (RC) | Physical bound |
 | `LONGITUDE_VALID_MIN` / `_MAX` | −180° / 180° | Range check (RC) | Physical bound |
@@ -473,19 +530,26 @@ that sank the 0.2°C attempt. See [Neighbour-average Spikes
 retest](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)
 above for the shipped implementation.
 
-**The TEMP range check's depth-banded envelope (NDO-705) went through the
-same real-data-first process.** The cookbook's "Profile Envelope" concept
-(section 2.4) suggests a depth-varying plausible range is possible in
-principle, but doesn't hand over exact numbers to use. Checked band-by-band
-against the same archive before picking anything: only the deepest band
-(≥1500 m) shows a clean gap between real data (max 16.92°C at those
-depths) and the nearest known fault cluster (starting at 32.04°C) — wide
-enough to draw a bound through safely. No other depth band showed a
-comparably clean gap in this ship's own data, so no other band got
-tightened. **The lesson generalises past both of these specific checks:**
-a plausible-looking bound (a rounder number, a value from a different
-ship's cookbook, a threshold from a different ocean) is not evidence it's
-safe for *this* ship's data — only running it against the real archive is.
+**The TEMP range check's depth-banded envelope (NDO-705, corrected NDO-763) went through the
+same real-data-first process — and shows why "checked once" isn't the same as "checked
+correctly".** The cookbook's "Profile Envelope" concept (section 2.4) suggests a depth-varying
+plausible range is possible in principle, but doesn't hand over exact numbers to use. NDO-705
+checked band-by-band against the same archive before picking anything, and concluded only the
+deepest band (≥1500 m) shows a clean gap between real data (max 16.92°C at those depths) and the
+nearest known fault cluster (starting at 32.04°C) — its own cited evidence for the shallower
+band being unsafe to tighten was "a genuine, smooth 12.12→16.1°C rise over 7 m at ~730 m depth".
+**That evidence was wrong.** NDO-763 (2026-09-13) re-identified it as part of cast 183's own
+fault ramp — nobody had checked it against the fuller fault population a later, more thorough
+review turned up. The real gap at 200-1500 m does exist, it's just much narrower (20.0°C ceiling,
+nearest confirmed-clean real data at 19.18°C) than the 1500 m band's wide one — narrow enough
+that it was missed the first time a single plausible-looking counter-example was taken at face
+value instead of checked against every other fault cluster already known. **The lesson
+generalises past all three of these checks now:** a plausible-looking bound (a rounder number, a
+value from a different ship's cookbook, a threshold from a different ocean) is not evidence it's
+safe for *this* ship's data — and neither is a single hand-inspected "real-looking" counter-example,
+if it was never cross-checked against the rest of the known fault population. Only running the
+full check against the real archive, and treating every "this looks real" judgement call as
+falsifiable, is.
 
 **"Wire Stretch" (v1.1 sections 4.4/4.5)** — a sustained, real-looking
 warming trend with depth over a wide range — was found in the same real
@@ -587,6 +651,31 @@ but worth checking before attempting the same approach there.
   formula stops catching this shape. If Wire Stretch ever gets its own
   dedicated check, revisit whether the spike test should switch to GTSPP's
   literal formula at that point.
+- **Shallow (<200 m) faults, found but not fixed by NDO-763.** The depth-banded range check's
+  flat bound above 200 m is deliberately unchanged — real near-surface/thermocline water during
+  this ship's transits through warmer latitudes genuinely reaches high enough temperatures that a
+  flat tighter bound isn't safe there. But this leaves real, confirmed faults uncaught in that
+  band: ~149 good samples >20°C at latitude ≤50°S across 9 casts (e.g. cast 361: 22-36°C over
+  12-165 m at 52.8°S — clearly the same fault signature as the deeper cases, just shallower).
+  Closing this needs a bound that's aware of both depth *and* latitude/region (an SST-validated
+  ceiling, not a flat one) — not attempted here; a real follow-up, not a "someday" note.
+- **A whole-cast fault that no per-point check can catch, found during NDO-763.** Cast 193
+  (54.5°S) reads a near-isothermal ~17-21°C water column from the surface to 740 m, 693 samples
+  still "good" — while cast 192, the same position 4.5 minutes earlier, reads 3.8-4.9°C
+  near-surface. This is the same real cast already discussed in the NDO-686 WOA-climatology
+  rejection above (there, framed as "confirmed physically sane 9-13°C water... a real ~7-10°C
+  offset from a shifted front") — re-examined for NDO-763, the *worked example* used to justify
+  that conclusion doesn't hold up against its own immediately-preceding cast. WOA's
+  sparse-sampling problem (the actual reason that approach was rejected) still stands on its own;
+  this specific supporting example doesn't. Only a repeat-drop/neighbouring-cast consistency
+  check could catch this class of fault — not implemented.
+- **A self-test cast that evades `is_test_probe_cast()`, found during NDO-763.** Cast 0
+  (`202324VT1A`) reads 32.4°C, then 3.8°C, then pins at ~1.5°C for ~700 samples — a textbook
+  self-test signature, except the isothermal-near-1.5°C check requires the pin to start from the
+  cast's *first* sample, and this one has a two-sample power-on transient before it settles. The
+  cast is published as real data. A narrow fix (allow a short leading transient before checking
+  for the isothermal pin) needs its own real-data validation before shipping, per this document's
+  usual discipline — not attempted here.
 
 ## References
 

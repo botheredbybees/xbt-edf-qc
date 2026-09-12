@@ -278,22 +278,64 @@ SOUND_VELOCITY_VALID_MAX = 1560.0
 
 # GTSPP Real-Time QC Manual (IOC M&G No. 22), Section 2.4 "Profile
 # Envelope": temperature's valid range should tighten with depth, not stay
-# one flat bound for the whole cast. Validated against the real 369-profile
-# historical archive before trusting a specific depth/bound pair
-# (2026-09-10, docs/superpowers/specs/2026-09-10-xbt-depth-band-and-spike-
-# retest-design.md): at depths >=1500 m there is a clean, wide gap in real
-# TEMP values -- nothing above 16.92 degC, then nothing again until 32.04
-# degC (the same already-known fault signature this file's SOUND_VELOCITY
-# bound and isolated-spike check both independently confirm). Shallower
-# depths show NO clean gap -- real regional fronts/eddies (confirmed by
-# hand: a genuine, smooth 12.12->16.1 degC rise over 7 m at ~730 m depth)
-# sit on a continuum with the same fault values all the way up to 37 degC,
-# so TEMP_VALID_MIN/TEMP_VALID_MAX (unchanged) remain the only defensible
-# bound there. Only the upper bound tightens at depth -- nothing in the
-# real-data investigation suggested the lower bound needs to differ by
-# depth.
-TEMP_DEEP_BAND_DEPTH_M = 1500.0
+# one flat bound for the whole cast.
+#
+# CORRECTED 2026-09-13 (NDO-763): this band used to start at 1500 m, on the
+# claim that shallower depths show "NO clean gap" between real data and
+# fault values -- cited evidence was "a genuine, smooth 12.12->16.1 degC
+# rise over 7 m at ~730 m depth". That example was wrong: re-identified
+# during the NDO-763 investigation as part of cast 183's fault ramp, not
+# real data. Believing it was real is exactly why this band was never
+# tightened below 1500 m, leaving ~1,452 samples across 106 casts (25-37
+# degC fault ramps at 200-1400 m, e.g. resistance/wire faults climbing from
+# real water to recorder saturation) published as GTSPP "good".
+#
+# Re-investigated against the full real historical archive
+# (cron_jobs_on_skippy/xbt_historical_backfill_output/xbt_historical_
+# profiles.nc): every single sample in the archive currently flagged good
+# at depth >=200 m with TEMP >20 degC belongs to a cast independently
+# confirmed fault-affected -- confirmed by inspecting each such cast's full
+# depth/TEMP profile shape (a fault is a rapid, near-monotonic climb from
+# real water values to recorder saturation; nothing resembling a real,
+# smooth front/eddy was found above this bound at this depth). No
+# confirmed-clean cast in the archive reads above 19.18 degC at depth >=200
+# m -- and even that highest borderline case (cast 171, a sharp jump from a
+# stable -1.58 degC Antarctic shelf-water layer) turned out to be another,
+# previously undetected fault, caught separately by
+# TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C below rather than by this band. The
+# gap here is real but narrow -- unlike the wide, comfortable margin at
+# 1500 m -- so don't loosen this bound without re-running the same
+# per-cast validation, not just checking for a "clean-looking" percentile.
+# Only the upper bound tightens at depth -- nothing in the real-data
+# investigation suggested the lower bound needs to differ by depth.
+TEMP_DEEP_BAND_DEPTH_M = 200.0
 TEMP_DEEP_VALID_MAX = 20.0
+
+# A distinct fault signature from the depth-band check above: a cast whose
+# TEMP record ends (either on its last recorded real sample, or on the last
+# real sample before a terminal NaN run/dropout) with a sharp jump from the
+# last real sample still confirmed good -- the "readings go off scale" moment
+# CSIRO XBT QC Cookbook v1.1 section 3.2 describes for a Wire Break, before
+# the connection is lost outright. Previously only audit-trailed (see
+# _flag_wire_break_cascade), never used to flag the deflected sample itself.
+# Added 2026-09-13 (NDO-763) after the depth-band investigation above kept
+# turning up cases invisible to every existing check: a cast holding a long,
+# stable, physically sane reading (e.g. -1.58 degC Antarctic shelf water for
+# hundreds of samples) that jumps by double digits on its very last one or
+# two real samples, often at a probe-type's rated max depth (T-7 at ~760 m,
+# many others ending near 900-920 m). Invisible to the neighbour-average
+# spike check (which needs two real neighbours) and to the depth-band range
+# check when the jump still lands under TEMP_DEEP_VALID_MAX. Validated
+# against the full real archive: ~100 samples flagged, individually
+# inspected by full-profile shape, zero found to be a real gradient rather
+# than a terminal fault deflection -- but the margin is narrow, not wide:
+# the largest terminal step found among casts otherwise untouched by any
+# check was 4.73 degC, and that cast turned out to be its own separate,
+# still-uncaught shallow (<200 m) fault (NDO-763 follow-up), not confirmed
+# real data -- so this threshold has NOT been shown safe with a comfortable
+# margin the way TEMP_DEEP_VALID_MAX's 1500 m band was. Don't lower this
+# constant without re-running the same full-archive, per-cast validation.
+TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C = 5.0
 
 # GTSPP Real-Time QC Manual (IOC M&G No. 22)'s own spike-test threshold --
 # 10x looser than the CSIRO cookbook's 0.2 degC, which this pipeline
@@ -844,6 +886,52 @@ def _flag_wire_break_cascade(qc: CastQC, now: datetime) -> None:
     ))
 
 
+def _flag_terminal_deflection(qc: CastQC, now: datetime) -> None:
+    """Flags a cast's last real TEMP sample if it jumps by more than
+    TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C from the most recent *still-good*
+    real sample before it -- see that constant's own module-level comment
+    for the real-data validation and its caveats. Deliberately compares
+    against the last CONFIRMED-GOOD value, not simply the immediately
+    preceding real one: an already-bad predecessor (e.g. an isolated spike
+    the checks above this one in apply_qc() already caught) is not a
+    trustworthy baseline to measure a "deflection" against, and every real
+    fault case found during validation still has an earlier, genuinely
+    stable good reading to compare the terminal value to. Complements
+    _flag_wire_break_cascade (which only audit-trails a *following* NaN run,
+    never touching temperature_qc) by acting on the deflected reading
+    itself, whether or not any NaN run follows it -- many real cases found
+    during validation have the cast's recording simply stop right there,
+    with no trailing NaN samples at all."""
+    temp = qc.cast.temperature_c
+    real = ~np.isnan(temp)
+    real_idx = np.flatnonzero(real)
+    if real_idx.size < 2:
+        return
+    last = real_idx[-1]
+    if qc.temperature_qc[last] != GTSPP_GOOD:
+        return
+    good_before_last = [i for i in real_idx[:-1] if qc.temperature_qc[i] == GTSPP_GOOD]
+    if not good_before_last:
+        return
+    prev = good_before_last[-1]
+    delta = abs(float(temp[last]) - float(temp[prev]))
+    if delta <= TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C:
+        return
+    qc.temperature_qc[last] = GTSPP_PROBABLY_BAD
+    depth = qc.cast.depth_m
+    qc.history.append(HistoryEntry(
+        institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+        software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+        start_depth=float(depth[last]), stop_depth=float(depth[last]),
+        qc_flag="WB",
+        qc_flag_description=(
+            f"TEMP jumped {delta:.2f} degC from the last confirmed-good real sample "
+            "on the cast's last real reading -- Wire Break signature (CSIRO XBT QC "
+            "Cookbook v1.1 section 3.2, \"readings go off scale\")"
+        ),
+    ))
+
+
 def _flag_position_on_land(qc: CastQC, now: datetime) -> None:
     """Flags a cast whose launch position is on land -- GTSPP Real-Time QC
     Manual (IOC M&G No. 22) test 1.4 "Position on Land". Only evaluates a
@@ -1043,6 +1131,7 @@ def apply_qc(casts: list) -> list:
         _flag_spikes(qc, now)
         _flag_neighbour_average_spikes(qc, now)
         _flag_wire_break_cascade(qc, now)
+        _flag_terminal_deflection(qc, now)
         _flag_array_out_of_range(qc, qc.depth_qc, cast.depth_m,
                                   DEPTH_VALID_MIN, DEPTH_VALID_MAX, "DEPTH", "m", now)
         _flag_array_out_of_range(qc, qc.sound_velocity_qc, cast.sound_velocity_ms,
