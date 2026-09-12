@@ -337,6 +337,33 @@ TEMP_DEEP_VALID_MAX = 20.0
 # constant without re-running the same full-archive, per-cast validation.
 TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C = 5.0
 
+# NDO-790: even after NDO-763's depth-band tightening, faults still slip through above 200 m at
+# high southern latitudes, where the flat -2.5..40 degC bound is far looser than real water ever
+# gets. A single additional latitude-only bound doesn't work everywhere -- real shallow water
+# legitimately spans from near-freezing (deep south) to the high-30s degC (tropical/temperate
+# transits) -- so this is banded, same idea as TEMP_DEEP_VALID_MAX's single band but split by
+# latitude instead of depth. Applies only to depth in [SURFACE_TRANSIENT_DEPTH_M,
+# TEMP_DEEP_BAND_DEPTH_M) -- shallower is CS's job, deeper is TEMP_DEEP_VALID_MAX's.
+#
+# Validated against the full real archive: excluding every cast independently confirmed
+# fault-affected (11 casts found via a first pass at a flat 20 degC/200 m check, plus cast 193 --
+# see NDO-792, a separate whole-cast fault), the real per-5-degree-latitude-bin max in this depth
+# range is 0.66 degC at <=-65 deg, 3.55 degC at -60..-65, 11.63 degC at -50..-55, 14.82 degC at
+# -45..-50, and 17.64 degC at -40..-45 -- a clean, monotonic, physically sensible gradient with no
+# outliers once the known faults are excluded. Every one of the bands below carries at least
+# ~2.4 degC of margin over that real max; re-run this same latitude-binned validation before
+# loosening any of them. Re-applying this rule against the full archive flags exactly the 11
+# originally-found casts plus cast 193 (already known, NDO-792) -- zero new/unexplained catches.
+TEMP_SHALLOW_LATITUDE_BANDS_C = (
+    # (latitude upper bound, TEMP ceiling) -- first matching band wins, most restrictive first.
+    (-60.0, 6.0),
+    (-50.0, 15.0),
+    (-45.0, 18.0),
+    (-40.0, 20.0),
+    # North of -40 degrees: no additional tightening -- real warm-water transits make a flat
+    # ceiling unsafe here, same reasoning TEMP_DEEP_BAND_DEPTH_M's own comment gives for depth.
+)
+
 # GTSPP Real-Time QC Manual (IOC M&G No. 22)'s own spike-test threshold --
 # 10x looser than the CSIRO cookbook's 0.2 degC, which this pipeline
 # already tried and rejected for 97 false positives on real fine-scale
@@ -755,6 +782,51 @@ def _flag_temperature_out_of_depth_band_range(qc: CastQC, now: datetime) -> None
         ))
 
 
+def _flag_temperature_shallow_latitude_band(qc: CastQC, now: datetime) -> None:
+    """Latitude-banded tightening of TEMP's shallow-band range check -- see
+    TEMP_SHALLOW_LATITUDE_BANDS_C's own module-level comment for the
+    real-data validation behind the specific bands chosen. Additive to
+    _flag_temperature_out_of_depth_band_range, not a replacement -- that
+    check's flat -2.5..40 degC bound for depth < TEMP_DEEP_BAND_DEPTH_M
+    still applies everywhere; this only tightens the upper bound further,
+    and only south of -40 degrees latitude. Uses the cast's raw latitude
+    value directly rather than gating on LATITUDE_qc, matching how the
+    existing depth-banded check uses DEPTH_VALUES directly without gating
+    on DEPTH_qc -- deliberately simple, since an out-of-range latitude just
+    fails every band comparison below and falls through to no tightening,
+    the safe default."""
+    lat = qc.cast.latitude
+    ceiling = None
+    for lat_max, temp_max in TEMP_SHALLOW_LATITUDE_BANDS_C:
+        if lat <= lat_max:
+            ceiling = temp_max
+            break
+    if ceiling is None:
+        return
+
+    temp = qc.cast.temperature_c
+    depth = qc.cast.depth_m
+    band = (depth >= SURFACE_TRANSIENT_DEPTH_M) & (depth < TEMP_DEEP_BAND_DEPTH_M)
+    bad = band & (temp > ceiling)
+    if not np.any(bad):
+        return
+
+    qc.temperature_qc[bad] = GTSPP_PROBABLY_BAD
+    bad_depths = depth[bad]
+    valid_bad_depths = bad_depths[~np.isnan(bad_depths)]
+    qc.history.append(HistoryEntry(
+        institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+        software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+        start_depth=float(np.min(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+        stop_depth=float(np.max(valid_bad_depths)) if valid_bad_depths.size else 0.0,
+        qc_flag="RC",
+        qc_flag_description=(
+            f"{int(np.sum(bad))} TEMP sample(s) above the latitude-banded shallow ceiling "
+            f"{ceiling} degC (latitude {lat:.2f}, depth < {TEMP_DEEP_BAND_DEPTH_M} m)"
+        ),
+    ))
+
+
 def _flag_spikes(qc: CastQC, now: datetime) -> None:
     """Flags a real TEMP value with no real data on either immediate side.
 
@@ -1128,6 +1200,7 @@ def apply_qc(casts: list) -> list:
         # FAULT_TEST_PROBE's wrong value was (see test_fault_bit_values_match_
         # appendix_f) -- fault_flags is deliberately left unset by all of these.
         _flag_temperature_out_of_depth_band_range(qc, now)
+        _flag_temperature_shallow_latitude_band(qc, now)
         _flag_spikes(qc, now)
         _flag_neighbour_average_spikes(qc, now)
         _flag_wire_break_cascade(qc, now)

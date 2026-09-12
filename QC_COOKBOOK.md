@@ -74,7 +74,7 @@ own, independent of `HISTORY_QC_FLAG`.
 | SP | ↳ [neighbour-average "Spikes" formula, at GTSPP's 2.0°C threshold](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented — simplified formula, deliberately not GTSPP's literal two-term one (NDO-727, [details](#neighbour-average-spikes-retest--sp-v11-section-33-gtspp-real-time-qc-manual)) |
 | PE + TE | [Speed check](#speed-check--pe--te-v11-section-424425) | Real casts, vs. previous real cast | LATITUDE/LONGITUDE/TIME/TEMP → probably bad, both codes together | `FAULT_POSITION_ERROR` + `FAULT_TIME_ERROR` | ✅ Implemented (both emitted, can't disambiguate) |
 | PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
-| RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 200 m since NDO-763, previously 1500 m — [details](#physical-plausibility-range-check--rc)) |
+| RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 200 m since NDO-763, previously 1500 m; shallow band also latitude-banded south of -40° since NDO-790 — [details](#physical-plausibility-range-check--rc)) |
 | PL | [Position on Land](#position-on-land--pl-gtspp-real-time-qc-manual-test-14) (GTSPP/SeaDataNet/SAMOS, not CSIRO) | All casts, incl. self-test | LATITUDE/LONGITUDE → probably bad | none | ✅ Implemented |
 | — | Wire Stretch (§4.4/4.5) | — | — | — | ❌ Not automated — usually still caught indirectly via `SOUND_VELOCITY` RC ([details](#what-we-tried-and-rejected)) |
 | SPR | Severe multi-point spiking (§3.3) | — | — | — | ❌ Not implemented — see [Open questions](#open-questions) |
@@ -420,6 +420,44 @@ shallower faults still slip through it (see [Open questions](#open-questions)). 
 re-running this same full-archive, per-cast validation — see [What we tried and
 rejected](#what-we-tried-and-rejected).
 
+#### Shallower than 200 m is latitude-banded too, south of -40° (NDO-790)
+
+**Status:** Implemented.
+
+Even after the 200 m tightening above, faults still slipped through above 200 m at high southern
+latitudes — the flat -2.5..40°C bound there is far looser than real shallow water at those
+latitudes ever gets. Two shapes found during validation: a deep-fault ramp crossing the 200 m
+boundary from below (e.g. a cast reading a smooth climb from ~2°C real water at 150 m to 28°C at
+200 m — the same fault population the 200 m band above already targets, just starting a little
+shallower for this particular cast); and a genuinely shallow fault at a warmer latitude (a cast
+at -43.5° warming smoothly from 20°C to 37°C between 4 m and 28 m — physically backwards for real
+near-surface structure, which cools or stays constant with depth near the surface, not warms).
+
+A single latitude-only bound doesn't work everywhere — real shallow water legitimately spans from
+near-freezing (deep south) to the high-30s°C (tropical/temperate transits) — so this is banded by
+latitude, the same idea as the depth band above but split the other way:
+
+| Latitude | Shallow (3.6–200 m) TEMP ceiling |
+|---|---|
+| ≤ -60° | 6.0°C |
+| -60° to -50° | 15.0°C |
+| -50° to -45° | 18.0°C |
+| -45° to -40° | 20.0°C (reuses `TEMP_DEEP_VALID_MAX`) |
+| north of -40° | unchanged (flat -2.5..40°C bound) |
+
+Validated the same way as every band in this document: excluding every cast independently
+confirmed fault-affected (11 casts found via an initial flat 20°C/200 m scan, plus one already
+known whole-cast fault — see [Open questions](#open-questions)), the real per-5°-latitude-bin max
+in this depth range is a clean, monotonic gradient — 0.66°C at ≤-65°, 3.55°C at -60° to -65°,
+11.63°C at -50° to -55°, 14.82°C at -45° to -50°, 17.64°C at -40° to -45° — with at least ~2.4°C
+of margin under every band above. Re-run against the full archive, this rule flags exactly those
+same 12 casts and nothing else — zero new or unexplained catches.
+
+North of -40° is deliberately left untightened, same reasoning as the depth band: real warm-water
+transits (the ship crosses the tropics) make a flat ceiling unsafe there. A fault occurring north
+of -40° would still slip through uncaught — an accepted, documented gap, not an oversight — see
+[Open questions](#open-questions).
+
 ### Position on Land — PL (GTSPP Real-Time QC Manual test 1.4)
 
 **Status:** Implemented (NDO-704). **This check's provenance is different from every other
@@ -470,6 +508,7 @@ be checked against each other without reading the source.
 | `TEMP_DEEP_BAND_DEPTH_M` | 200.0 m (was 1500.0 m until NDO-763) | Range check (RC) — depth-band boundary | Real-data statistical gap, this ship's own archive (see [above](#temp-is-depth-banded-not-one-flat-range-v11-section-24-profile-envelope)) — narrow margin, not a wide one; don't loosen without re-validating |
 | `TEMP_DEEP_VALID_MAX` | 20.0°C | Range check (RC), depths ≥ 200 m | Real-data statistical gap, this ship's own archive — same source as `TEMP_DEEP_BAND_DEPTH_M` |
 | `TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C` | 5.0°C | Terminal Deflection (WB) | Real-data validation, this ship's own archive (NDO-763) — narrow margin (4.73°C closest real-ish case, itself a separate uncaught fault), see [above](#terminal-deflection--wb-v11-section-32-same-citation-as-wire-break-cascade) |
+| `TEMP_SHALLOW_LATITUDE_BANDS_C` | 6.0-20.0°C by latitude band | Range check (RC), depths 3.6-200m | Real-data statistical gap, this ship's own archive (NDO-790), see [above](#shallower-than-200-m-is-latitude-banded-too-south-of--40-ndo-790) — margin ≥2.4°C in every band |
 | `SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C` | 2.0°C | Neighbour-average Spikes retest (SP) | GTSPP Real-Time QC Manual (IOC M&G No. 22), not the cookbook's own 0.2°C (rejected — see [below](#what-we-tried-and-rejected)) |
 | `LATITUDE_VALID_MIN` / `_MAX` | −90° / 90° | Range check (RC) | Physical bound |
 | `LONGITUDE_VALID_MIN` / `_MAX` | −180° / 180° | Range check (RC) | Physical bound |
@@ -651,14 +690,14 @@ but worth checking before attempting the same approach there.
   formula stops catching this shape. If Wire Stretch ever gets its own
   dedicated check, revisit whether the spike test should switch to GTSPP's
   literal formula at that point.
-- **Shallow (<200 m) faults, found but not fixed by NDO-763.** The depth-banded range check's
-  flat bound above 200 m is deliberately unchanged — real near-surface/thermocline water during
-  this ship's transits through warmer latitudes genuinely reaches high enough temperatures that a
-  flat tighter bound isn't safe there. But this leaves real, confirmed faults uncaught in that
-  band: ~149 good samples >20°C at latitude ≤50°S across 9 casts (e.g. cast 361: 22-36°C over
-  12-165 m at 52.8°S — clearly the same fault signature as the deeper cases, just shallower).
-  Closing this needs a bound that's aware of both depth *and* latitude/region (an SST-validated
-  ceiling, not a flat one) — not attempted here; a real follow-up, not a "someday" note.
+- **Resolved 2026-09-13 (NDO-790):** shallow (<200 m) faults found but not fixed by NDO-763 —
+  see [Shallower than 200 m is latitude-banded too](#shallower-than-200-m-is-latitude-banded-too-south-of--40-ndo-790)
+  above. Fixed south of -40° latitude with a latitude-banded ceiling. **Still open north of -40°**
+  — real warm-water transits through the tropics make a flat ceiling unsafe there, so a fault in
+  that region (or shallower than 200m generally, outside the specific shapes NDO-790 checked)
+  would still slip through uncaught. An SST-climatology-validated ceiling (rather than the coarse
+  latitude bins used here) would be the natural next step if a real case ever turns up there —
+  not attempted, since NDO-790 had no confirmed real case north of -40° to validate against.
 - **A whole-cast fault that no per-point check can catch, found during NDO-763.** Cast 193
   (54.5°S) reads a near-isothermal ~17-21°C water column from the surface to 740 m, 693 samples
   still "good" — while cast 192, the same position 4.5 minutes earlier, reads 3.8-4.9°C

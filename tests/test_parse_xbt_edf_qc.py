@@ -181,9 +181,11 @@ def test_a_cast_can_trigger_at_most_five_history_entries():
     # with its real neighbours). This is the expected, validated new
     # behaviour, not a regression -- confirms the two checks are genuinely
     # complementary, not just independently correct in isolation.
-    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    # Latitudes kept north of every TEMP_SHALLOW_LATITUDE_BANDS_C band (not what this test is
+    # about) while preserving the same 1-degree/10-minute separation the speed check needs.
+    first = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-32.0, longitude=149.0)
     second = _cast(
-        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-41.0, longitude=149.0,
+        launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=-31.0, longitude=149.0,
         probe_type_raw="NotARealProbe", probe_type="NotARealProbe",
         temperature_c=np.array([10.0, 999.0, 10.0]),
     )
@@ -220,6 +222,7 @@ def test_temperature_within_valid_range_never_gets_an_rc_entry():
         temperature_c=temps,
         sound_velocity_ms=np.full(n, 1500.0),
         elapsed_s=np.linspace(0.0, 0.9, n),
+        latitude=0.0,  # north of every TEMP_SHALLOW_LATITUDE_BANDS_C band -- not what this test is about
     )
     [qc] = apply_qc([cast])
     assert np.all(qc.temperature_qc == GTSPP_GOOD)
@@ -471,6 +474,7 @@ def test_unstable_test_probe_flags_temperature():
     unstable = _cast(
         serial_number="TestProbe",
         temperature_c=np.array([20.0, 20.5, 20.0]),  # 0.5 degC variation, way over 0.005
+        latitude=0.0,  # north of every TEMP_SHALLOW_LATITUDE_BANDS_C band -- not what this test is about
     )
     [qc] = apply_qc([unstable])
     assert np.all(qc.temperature_qc == GTSPP_PROBABLY_BAD)
@@ -482,6 +486,7 @@ def test_stable_test_probe_stays_good():
     stable = _cast(
         serial_number="TestProbe",
         temperature_c=np.array([20.001, 20.002, 20.0015]),
+        latitude=0.0,  # north of every TEMP_SHALLOW_LATITUDE_BANDS_C band -- not what this test is about
     )
     [qc] = apply_qc([stable])
     assert np.all(qc.temperature_qc == GTSPP_GOOD)
@@ -647,6 +652,7 @@ def test_temperature_shallow_band_still_flags_outside_the_flat_bound():
     cast = _cast(
         depth_m=np.array([10.0, 11.0, 12.0]),
         temperature_c=np.array([10.0, TEMP_VALID_MAX + 1.0, 10.0]),
+        latitude=0.0,  # north of every TEMP_SHALLOW_LATITUDE_BANDS_C band -- not what this test is about
     )
     [qc] = apply_qc([cast])
     assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_GOOD]
@@ -699,6 +705,7 @@ def test_temperature_both_bands_bad_produces_two_separate_rc_entries():
     cast = _cast(
         depth_m=np.array([10.0, TEMP_DEEP_BAND_DEPTH_M + 100.0]),
         temperature_c=np.array([TEMP_VALID_MAX + 1.0, TEMP_DEEP_VALID_MAX + 1.0]),
+        latitude=0.0,  # north of every TEMP_SHALLOW_LATITUDE_BANDS_C band -- not what this test is about
     )
     [qc] = apply_qc([cast])
     rc_entries = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
@@ -730,6 +737,56 @@ def test_temperature_real_water_at_200m_below_tightened_ceiling_stays_good():
     cast = _cast(
         depth_m=np.array([200.0, 205.0, 210.0]),
         temperature_c=np.array([18.0, 19.0, 18.5]),
+    )
+    [qc] = apply_qc([cast])
+    assert np.all(qc.temperature_qc == GTSPP_GOOD)
+
+
+def test_shallow_latitude_band_flags_a_fault_south_of_60_degrees_ndo_790():
+    # Regression for NDO-790: real casts at high southern latitude (e.g. cast
+    # 96/102 in the historical archive) had a fault ramp cross the 200 m
+    # boundary from below, publishing as good between ~150-200 m. South of
+    # -60 degrees the real ceiling is 6 degC -- comfortably under any real
+    # water this ship has ever recorded there.
+    cast = _cast(
+        depth_m=np.array([150.0, 160.0, 170.0]),
+        temperature_c=np.array([2.0, 8.0, 15.0]),
+        latitude=-63.0,
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_PROBABLY_BAD, GTSPP_PROBABLY_BAD]
+    [entry] = [e for e in qc.history if e.qc_flag == "RC" and "latitude-banded" in e.qc_flag_description]
+    assert "6.0 degC" in entry.qc_flag_description
+    assert "-63.00" in entry.qc_flag_description
+
+
+def test_shallow_latitude_band_real_water_stays_good_at_each_band():
+    # One point comfortably under the ceiling in each defined band, plus one
+    # north of every band -- none of these should ever be flagged.
+    for lat, temp in [(-65.0, 1.0), (-55.0, 10.0), (-47.0, 15.0), (-42.0, 18.0), (-10.0, 35.0)]:
+        cast = _cast(depth_m=np.array([50.0, 60.0, 70.0]), temperature_c=np.array([temp] * 3), latitude=lat)
+        [qc] = apply_qc([cast])
+        assert np.all(qc.temperature_qc == GTSPP_GOOD), f"lat={lat} temp={temp}"
+
+
+def test_shallow_latitude_band_does_not_apply_below_surface_transient_depth():
+    # A hot near-surface reading inside the CS zone (<3.6 m) is CS's job, not
+    # this check's -- it must not also pick up an RC flag from the latitude band.
+    cast = _cast(
+        depth_m=np.array([0.0, 1.0, 2.0]),
+        temperature_c=np.array([30.0, 30.0, 30.0]),
+        latitude=-65.0,
+    )
+    [qc] = apply_qc([cast])
+    assert "RC" not in [e.qc_flag for e in qc.history if e.parameter == "TEMP"]
+
+
+def test_shallow_latitude_band_does_not_apply_at_or_below_200m():
+    # depth >= TEMP_DEEP_BAND_DEPTH_M is TEMP_DEEP_VALID_MAX's job, not this one's.
+    cast = _cast(
+        depth_m=np.array([200.0, 210.0, 220.0]),
+        temperature_c=np.array([5.9, 5.9, 5.9]),
+        latitude=-65.0,
     )
     [qc] = apply_qc([cast])
     assert np.all(qc.temperature_qc == GTSPP_GOOD)
