@@ -89,12 +89,36 @@ even applies to a given cast.
 A self-test cast (the recorder's own built-in calibration check, not a real
 deployed probe) is identified by *any* of: "test" (case-insensitive) in the
 Serial Number, Memo, or source filename; or the cookbook's own documented
-signature (v1.1 section 2.2): isothermal at ~1.5±0.15°C **from the very
-first (surface) sample**, for at least half the cast. The surface
-requirement matters — a genuine Southern Ocean cast can be isothermal near
-1-2°C at depth without being a test probe, but a real deployed probe's
-surface reading is the actual sea-surface temperature, never suspiciously
-pinned at 1.5°C.
+signature (v1.1 section 2.2): isothermal at ~1.5±0.15°C, in one contiguous
+run starting at or above the surface-transient depth, for at least half the
+cast. Requiring the run to *start near the surface* matters — a genuine
+Southern Ocean cast can have a real, physically genuine isothermal layer
+(e.g. a deep CDW layer starting 160-250 m down) that happens to sit near
+1.5°C, but a real deployed probe's surface reading is the actual
+sea-surface temperature, never suspiciously pinned at 1.5°C.
+
+**Corrected 2026-09-13 (NDO-791) from an earlier version that only checked the cast's literal
+first sample.** That version missed a real, confirmed case: a genuine, numbered T-5 probe
+launched with the recorder's own self-test resistor still clipped in at the junction box — real
+Serial Number, real Memo, real launch position, nothing textual to catch, but its TEMP record is
+just the fixed resistor's value with a two-sample power-on transient before it settles, not
+seawater. Confirmed down to the raw resistance trace (see `TEST_PROBE_ISOTHERMAL_MIN_FRACTION`'s
+own comment in `parse_xbt_edf.py`): the same ~15.1 kΩ fixed value, same near-zero wander, as a
+known bench self-test cast in the archive — real thermistors in real water (six confirmed-isothermal
+casts checked) show 4.6-13x more resistance wander even when pinned at a single 0.01°C reading for
+hundreds of samples. The old "literal first sample" version had, ironically, been broken by an
+*earlier* fix (NDO-729): once the Surface Transient methodology stopped destroying real shallow
+data, a genuinely real cast's actual, non-isothermal surface reading survived as `valid[0]` — good
+for that cast, but it meant a self-test cast's own short leading power-on transient (also no longer
+destroyed) could push its *own* isothermal pin one or two samples away from literal index 0,
+letting it slip past the same check from the other direction. The fix generalises past "check the
+first sample" to "find the longest contiguous run, and check where *it* starts" — validated
+against the full real archive to confirm this doesn't misclassify a real, non-contiguous, or
+deep-starting isothermal layer (see `_is_isothermal_near_1_5c()`'s own docstring for the specific
+real cases checked and rejected). This class of fault publishes as `GTSPP_GOOD`, not simply
+"excluded" — a distinct log warning fires when it's caught only by this data signature under a
+real (non-"test") Serial Number, since a real, numbered probe was wasted, not merely a bench test
+run.
 
 Self-test casts are excluded from the published NetCDF, but a *failed*
 self-test (temperature variation ≥0.005°C, `TEST_PROBE_MAX_TEMPERATURE_VARIATION_C`)
@@ -147,20 +171,34 @@ genuinely deeper, previously-good data. Confirmed again after deploying the real
 (112 profiles) is unchanged from before this fix — the "new" flags found during design were
 already accounted for, not a regression introduced by shipping it.
 
-**Bonus find while deploying: this fix also recovers one entire real cast that this pipeline had
-been wrongly excluding for its whole history**, via a second, independent interaction with
-`is_test_probe_cast()`'s data-driven isothermal-near-1.5°C signal. That signal looks at the
-*first non-`NaN`* sample, not literally index 0 — under the old destroy-the-shallow-data
-methodology, a real cast's true surface reading could be masked away, leaving the "first
-surviving" sample to be whatever the check happens to see below 3.7 m. For
-`202425VT1_TDB_20241009000411.edf`: the true surface is a real -0.03°C reading (with a brief,
-genuine transient spike to 11.78°C at 0.68 m before settling), followed by a real, cold,
-near-isothermal ~1.49°C water column from 1.37 m onward — a real polar layer, not a test probe.
-Under the old methodology, masking deleted the -0.03°C surface value, leaving the isothermal
-~1.49°C layer as the "first surviving" sample — which coincidentally matched the test-probe
-signature closely enough to wrongly exclude this genuine cast from the published archive.
-Confirmed this is the *only* cast in the archive affected (checked systematically, not assumed)
-before trusting the archive's profile count changing from 368 to 369 after this fix.
+**Bonus find while deploying, and later corrected: this fix changed which cast
+`is_test_probe_cast()`'s data-driven isothermal-near-1.5°C signal caught, via a second,
+independent interaction.** That signal used to look at the *first non-`NaN`* sample, not
+literally index 0 — under the old destroy-the-shallow-data methodology, a cast's true surface
+reading could be masked away, leaving the "first surviving" sample to be whatever the check
+happens to see below 3.7 m. For `202425VT1_TDB_20241009000411.edf`: the recorded surface is a
+real -0.03°C reading (with a brief transient spike to 11.78°C at 0.68 m), followed by a
+near-isothermal ~1.49°C reading from 1.37 m onward. Under the old methodology, masking deleted
+the -0.03°C surface value, leaving the isothermal layer as the "first surviving" sample — which
+matched the test-probe signature closely enough to exclude this cast, and this fix (by stopping
+the masking) let it back into the published archive as "recovered real data."
+
+**That conclusion was wrong — corrected 2026-09-13 (NDO-791).** The ~1.49°C layer isn't real
+water: it's the self-test resistor's fixed value, recorded because the probe was launched with
+the test clips still connected at the junction box (confirmed via the raw resistance trace — see
+`TEST_PROBE_ISOTHERMAL_MIN_FRACTION`'s comment in `parse_xbt_edf.py`, and the [Test Probe
+detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else) section above).
+Real Serial Number, real Memo, real launch position — a genuine, numbered T-5 was wasted on this
+launch, but nothing about its TEMP record is real oceanographic data. NDO-791's fix (checking
+where the isothermal run *starts*, not just the cast's first sample) correctly excludes this cast
+again — the profile count doesn't return to 368, though; a different fix's own investigation
+found and excluded a second, previously-undetected case at the same time (see NDO-791's own
+QC_COOKBOOK.md section for the count). **The generalizable lesson, on top of the one this whole
+section already teaches:** confirming a procedural bug is real (the masking-based exclusion logic
+*was* broken) is not the same as confirming the specific case it affected is what you assume it
+is. This one was checked "systematically, not assumed" for *how many* casts were affected, but not
+for *whether the recovered cast's own data was actually real* — that took a second investigation,
+months later, prompted by an unrelated ticket finding the same TEMP shape again elsewhere.
 
 #### Not implemented: CSR (Reject variant)
 
@@ -663,6 +701,32 @@ generalises to the underway-merger pipeline's own gross-range bounds too
 (same ship, same region, same frontal dynamics) — not separately tested,
 but worth checking before attempting the same approach there.
 
+**A generic "stuck reading" check (NDO-791 Part B) was investigated and deliberately not
+shipped — there was nothing left in the real archive to validate it against.** After the
+Test Probe detection fix above closed the two known real cases of a fixed-resistor reading
+publishing as good data, every other long, low-variance TEMP run in the archive was individually
+cross-checked against real casts at similar latitude/depth (±2°, ±25 m): 142 casts with a
+≥150-sample run within 0.02°C, every one within 1.0°C of its neighbours' real 10th-90th
+percentile range (max deviation 0.99°C — a real modified CDW layer at 67°S). Two more specific
+ideas were tried and rejected before concluding this:
+
+- **Run length at one identical value.** Real freezing shelf water pins at a single 0.01°C
+  reading for 344 consecutive samples in the real archive; the known fault ran to 686. A rule
+  needing only ~2x that margin isn't safe.
+- **A flat run starting from the surface, by span rather than value.** Real winter mixed layers
+  hold within 0.02°C for 195-250 m from the surface at 43°S in four separate real casts. Without
+  also checking the value sits near a physically implausible number (like 1.5°C is for a bench
+  test), this is just the Test Probe check's own rule with the one thing that makes it safe
+  removed.
+
+One genuinely promising lead surfaced but not pursued further: the ratio of a run's total
+resistance standard deviation to the recorder's own ADC noise floor (≈1.3 for a stuck/fixed
+reading, 4.6-13 for six confirmed-real isothermal casts) is physically principled and would catch
+a fixed-resistor reading at *any* temperature, not only 1.5°C. Not shipped — it needs `Cast` to
+retain the EDF's Resistance (ohms) column (currently parsed and discarded), was checked against
+only seven real casts, and the margin thins noticeably on short runs. Revisit if a stuck-reading
+case ever turns up at a temperature the isothermal check doesn't already cover.
+
 ## Open questions
 
 - **Resolved 2026-09-11 (NDO-729):** whether the 2022 edition (v2.1) revises the surface-spike
@@ -708,13 +772,19 @@ but worth checking before attempting the same approach there.
   sparse-sampling problem (the actual reason that approach was rejected) still stands on its own;
   this specific supporting example doesn't. Only a repeat-drop/neighbouring-cast consistency
   check could catch this class of fault — not implemented.
-- **A self-test cast that evades `is_test_probe_cast()`, found during NDO-763.** Cast 0
-  (`202324VT1A`) reads 32.4°C, then 3.8°C, then pins at ~1.5°C for ~700 samples — a textbook
-  self-test signature, except the isothermal-near-1.5°C check requires the pin to start from the
-  cast's *first* sample, and this one has a two-sample power-on transient before it settles. The
-  cast is published as real data. A narrow fix (allow a short leading transient before checking
-  for the isothermal pin) needs its own real-data validation before shipping, per this document's
-  usual discipline — not attempted here.
+- **Resolved 2026-09-13 (NDO-791), with a correction to how it was first framed.** NDO-763
+  flagged "cast 0" (`202324VT1A`, 32.4°C → 3.8°C → pinned ~1.5°C for ~700 samples) as evading
+  `is_test_probe_cast()`. On investigation, that specific cast turned out to be a non-issue in
+  current code — it's `VT1A_testprobe20230807033912.edf`, already excluded via its Memo field;
+  the stale archive used for that first investigation predates the 2026-09-08 fix that added the
+  Memo/filename checks. The *real*, still-live gap the isothermal signature exists for was a
+  different cast entirely (see the corrected [Test Probe
+  detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else) section and
+  its Bonus Find correction above) — fixed the same day. **Generalises past this one ticket:**
+  when a stale local archive is the only evidence for a claimed bug, confirm the specific example
+  still reproduces against current code before designing a fix around it — the symptom described
+  can be real (something *was* wrong) while the specific example cited for it is an artefact of
+  stale data.
 
 ## References
 

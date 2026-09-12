@@ -463,6 +463,25 @@ SURFACE_TRANSIENT_DEPTH_M = 3.6
 # can corrupt a large-but-still-minority fraction of an otherwise-genuine
 # test-probe cast (see the recorder-earthing Known Issue) without the cast
 # ceasing to BE a test probe.
+#
+# NDO-791 (2026-09-13) confirmed the real mechanism behind this signature down
+# to the raw resistance trace: a genuine, numbered T-5 probe was launched with
+# the recorder's own self-test resistor still clipped in at the junction box.
+# Its Resistance (ohms) column -- parsed at Field2 above but not retained on
+# Cast, since no check needs it -- sits at ~15,137 ohms with a standard
+# deviation of 0.20 ohms across ~700 samples; a known bench self-test cast in
+# the same archive reads the same ~15,120 ohm fixed value with the same 0.20
+# ohm noise floor. Six confirmed-real isothermal casts checked for comparison
+# (including one pinned at a single 0.01 degC TEMP reading for 344 samples,
+# real freezing shelf water) all show 4.6-13x more resistance wander than
+# that -- a real thermistor in real water never sits this still. The cast
+# ends with resistance collapsing to ~19 ohms (a wire shorted in seawater),
+# not the bench self-test's ~-2.1 ohm open circuit -- consistent with the test
+# clips coming off only after the real wire had already failed. Real Serial
+# Number, real Memo, real launch position throughout; nothing textual to
+# catch this on. See _is_isothermal_near_1_5c() for how the fix is actually
+# applied (contiguous-run + surface-start, not resistance -- Cast doesn't
+# carry resistance data, this was investigation evidence only).
 TEST_PROBE_ISOTHERMAL_CENTER_C = 1.5
 TEST_PROBE_ISOTHERMAL_TOLERANCE_C = 0.15
 TEST_PROBE_ISOTHERMAL_MIN_FRACTION = 0.5
@@ -609,44 +628,83 @@ def is_test_probe_cast(cast: Cast) -> bool:
 
     A fourth, data-driven signal was added the same day: the CSIRO Cookbook's
     own documented test-probe signature (see TEST_PROBE_ISOTHERMAL_CENTER_C)
-    -- isothermal near 1.5 degC for a majority of the cast AND at the very
-    first (surface) sample. The surface requirement matters: a real deployed
-    probe's surface reading is the actual sea-surface temperature, which is
-    never suspiciously pinned near 1.5 degC at the first sample together with
-    a majority of every other depth also sitting there -- a genuine Southern
-    Ocean cast can have long isothermal stretches near 1-2 degC at depth, but
-    not from the surface down, so requiring both together is what keeps this
-    from excluding real cold-water data (not validated against a real false
-    positive during development -- if one ever turns up, this is the first
-    place to look).
+    -- isothermal near 1.5 degC for a majority of the cast, in one contiguous
+    run starting at or above the surface-transient depth. This exists for a
+    real, confirmed case none of the three textual signals above can ever
+    catch: a genuine, numbered probe launched with the recorder's own
+    self-test resistor still clipped in at the junction box (found during
+    NDO-791, 2026-09-13 -- see TEST_PROBE_ISOTHERMAL_MIN_FRACTION's own
+    comment for the resistance-trace evidence). That cast has a real Serial
+    Number, a real Memo, a real launch position -- nothing textual to catch --
+    but its TEMP record is still just the fixed test resistor's value, not
+    seawater. See _is_isothermal_near_1_5c() for why *contiguity* and *where
+    the run starts* both matter, not just the majority-fraction test alone.
     """
-    haystacks = (
-        cast.serial_number,
-        cast.memo,
-        os.path.basename(cast.source_file),
-    )
     return (
-        any("test" in haystack.lower() for haystack in haystacks)
-        or _is_isothermal_near_1_5c(cast.temperature_c)
+        _has_textual_test_indication(cast)
+        or _is_isothermal_near_1_5c(cast.temperature_c, cast.depth_m)
     )
 
 
-def _is_isothermal_near_1_5c(temperature_c: np.ndarray) -> bool:
-    """True if `temperature_c` is isothermal near 1.5 degC from the surface.
+def _has_textual_test_indication(cast: Cast) -> bool:
+    """True if Serial Number, Memo, or the source filename mentions "test"."""
+    haystacks = (cast.serial_number, cast.memo, os.path.basename(cast.source_file))
+    return any("test" in haystack.lower() for haystack in haystacks)
 
-    See is_test_probe_cast()'s docstring for why both the surface condition
-    and the majority-fraction condition are required together.
+
+def _is_isothermal_near_1_5c(temperature_c: np.ndarray, depth_m: np.ndarray) -> bool:
+    """True if `temperature_c` holds one contiguous run near 1.5 degC, starting
+    at or above the surface, covering a majority of the cast.
+
+    Corrected 2026-09-13 (NDO-791) from an earlier version that only checked
+    the cast's literal first valid sample -- that version couldn't tell a
+    genuine test-resistor signature (see TEST_PROBE_ISOTHERMAL_MIN_FRACTION's
+    comment) apart from a real cast with a short leading transient, and
+    missed both real cases in the historical archive it should have caught.
+
+    Two conditions, both required, validated together against the full real
+    archive (370 profiles): the longest contiguous in-band run must (a) start
+    at a depth <= SURFACE_TRANSIENT_DEPTH_M, and (b) cover >=
+    TEST_PROBE_ISOTHERMAL_MIN_FRACTION of the cast's valid samples. Neither
+    alone is safe -- checked and rejected:
+    - Fraction alone (any in-band sample above the surface, not necessarily
+      contiguous): fires on a real cast whose surface layer *and* a separate
+      deep CDW layer both happen to sit near 1.5 degC, with real Winter Water
+      in between pulling the fraction over the threshold.
+    - Contiguity alone (a long run anywhere, not required to start near the
+      surface): fires on real casts whose CDW layer starts well below the
+      surface (160-250 m) and is genuinely isothermal near 1.5 degC for
+      hundreds of metres -- a real, not a fault, water-mass signature.
+
+    Together: fires on exactly the two known real cases (fractions 0.994 and
+    0.996) and nothing else in the archive -- the next-highest real cast sits
+    at 0.107, a >5x margin below TEST_PROBE_ISOTHERMAL_MIN_FRACTION.
     """
-    valid = temperature_c[~np.isnan(temperature_c)]
-    if valid.size == 0:
+    real_idx = np.flatnonzero(~np.isnan(temperature_c))
+    if real_idx.size == 0:
         return False
     lower = TEST_PROBE_ISOTHERMAL_CENTER_C - TEST_PROBE_ISOTHERMAL_TOLERANCE_C
     upper = TEST_PROBE_ISOTHERMAL_CENTER_C + TEST_PROBE_ISOTHERMAL_TOLERANCE_C
-    surface_near = lower <= valid[0] <= upper
-    if not surface_near:
+    in_band = (temperature_c[real_idx] >= lower) & (temperature_c[real_idx] <= upper)
+
+    best_len, best_start = 0, None
+    run_len, run_start = 0, None
+    for i, hit in enumerate(in_band):
+        if hit:
+            if run_len == 0:
+                run_start = i
+            run_len += 1
+            if run_len > best_len:
+                best_len, best_start = run_len, run_start
+        else:
+            run_len = 0
+    if best_start is None:
         return False
-    near = (valid >= lower) & (valid <= upper)
-    return (np.sum(near) / valid.size) >= TEST_PROBE_ISOTHERMAL_MIN_FRACTION
+
+    run_start_depth = depth_m[real_idx[best_start]]
+    if np.isnan(run_start_depth) or run_start_depth > SURFACE_TRANSIENT_DEPTH_M:
+        return False
+    return (best_len / real_idx.size) >= TEST_PROBE_ISOTHERMAL_MIN_FRACTION
 
 
 def _flag_array_out_of_range(qc: CastQC, qc_array: np.ndarray, values: np.ndarray,
@@ -1085,6 +1143,17 @@ def apply_qc(casts: list) -> list:
 
     for cast in ordered:
         is_test_probe = is_test_probe_cast(cast)
+        if is_test_probe and not _has_textual_test_indication(cast):
+            # NDO-791: caught only by the isothermal-near-1.5 data signature, with a
+            # real Serial Number/Memo/filename -- this is a genuine probe launched
+            # with the self-test resistor still clipped in, not a bench test. Worth
+            # its own log line: a real, numbered probe was wasted on this cast.
+            logger.warning(
+                "Cast excluded as a test probe via the isothermal-1.5degC data signature "
+                "alone (Serial Number %r, %s) -- likely a real probe launched with the "
+                "self-test resistor still connected, not a bench self-test.",
+                cast.serial_number, os.path.basename(cast.source_file),
+            )
 
         qc = CastQC(cast=cast)
 

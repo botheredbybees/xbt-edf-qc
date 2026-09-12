@@ -531,6 +531,7 @@ def test_test_probe_identified_via_isothermal_1_5c_signature_alone():
     # this must be caught by the data signature alone.
     cast = _cast(
         serial_number="1396178", memo="", source_file="202425030_DB_20250301203416.edf",
+        depth_m=np.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0]),  # all within SURFACE_TRANSIENT_DEPTH_M
         temperature_c=np.array([1.51, 1.51, 1.51, 1.52, 1.5, 1.49]),
     )
     assert is_test_probe_cast(cast)
@@ -544,6 +545,9 @@ def test_cold_real_cast_with_no_test_indication_is_not_a_test_probe():
     # resemble a test-probe signature.
     cast = _cast(
         serial_number="1396178", memo="", source_file="202425030_DB_20250301203416.edf",
+        # The isothermal-near-1.5 run starts at index 3, depth 4.0m -- beyond
+        # SURFACE_TRANSIENT_DEPTH_M, so it must not count as "from the surface".
+        depth_m=np.array([0.5, 1.0, 1.5, 4.0, 5.0, 6.0, 7.0]),
         temperature_c=np.array([-1.2, -0.5, 0.8, 1.51, 1.51, 1.52, 1.49]),
     )
     assert not is_test_probe_cast(cast)
@@ -554,9 +558,67 @@ def test_brief_surface_coincidence_near_1_5c_is_not_a_test_probe():
     # nothing like isothermal -- a real cast, not a test probe.
     cast = _cast(
         serial_number="1396178", memo="", source_file="202425030_DB_20250301203416.edf",
+        depth_m=np.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0]),
         temperature_c=np.array([1.5, 4.0, 8.0, 12.0, 15.0, 18.0]),
     )
     assert not is_test_probe_cast(cast)
+
+
+def test_isothermal_signature_requires_contiguity_ndo_791():
+    # Regression for NDO-791: a real surface layer AND a separate real deep
+    # layer both near 1.5 degC, with real Winter Water between them, must
+    # not be misclassified just because their combined (non-contiguous)
+    # fraction crosses the majority threshold. Modelled on a real archive
+    # case (a cast whose surface and its 477m+ CDW layer both read ~1.5degC).
+    cast = _cast(
+        serial_number="1396178", memo="", source_file="202425030_DB_20250301203416.edf",
+        depth_m=np.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]),
+        temperature_c=np.array([1.5, 1.51, 1.49, -0.7, -0.7, -0.7, -0.7]),
+    )
+    assert not is_test_probe_cast(cast)
+
+
+def test_isothermal_signature_requires_a_surface_start_ndo_791():
+    # Regression for NDO-791: a long, genuinely isothermal-near-1.5 real CDW
+    # layer starting well below the surface (not from index 0) must not be
+    # misclassified just because it's a majority of the cast. Modelled on
+    # real archive cases (CDW layers starting 160-250m down).
+    cast = _cast(
+        serial_number="1396178", memo="", source_file="202425030_DB_20250301203416.edf",
+        depth_m=np.array([0.5, 1.0, 1.5, 5.0, 5.5, 6.0, 6.5]),
+        temperature_c=np.array([-1.2, -0.8, -0.3, 1.51, 1.5, 1.49, 1.51]),
+    )
+    assert not is_test_probe_cast(cast)
+
+
+def test_isothermal_signature_with_a_short_leading_transient_is_a_test_probe_ndo_791():
+    # Regression for NDO-791: the real, confirmed case -- a genuine numbered
+    # probe launched with the self-test resistor still clipped in. Two
+    # samples of power-on transient before the pin settles, both still
+    # within SURFACE_TRANSIENT_DEPTH_M, must not defeat the surface-start
+    # requirement. No "test" anywhere in serial_number/memo/filename --
+    # this must be caught by the data signature alone.
+    cast = _cast(
+        serial_number="1383580", memo="Deep Blue XBT on 202425VT1", source_file="202425VT1_TDB_20241009000411.edf",
+        depth_m=np.array([0.0, 0.7, 1.4, 2.0, 2.7, 3.4]),
+        temperature_c=np.array([-0.03, 11.78, 1.5, 1.49, 1.49, 1.49]),
+    )
+    assert is_test_probe_cast(cast)
+
+
+def test_isothermal_only_test_probe_logs_a_distinct_warning_ndo_791(caplog):
+    import logging
+
+    cast = _cast(
+        serial_number="1383580", memo="Deep Blue XBT on 202425VT1", source_file="202425VT1_TDB_20241009000411.edf",
+        depth_m=np.array([0.0, 0.7, 1.4, 2.0, 2.7, 3.4]),
+        temperature_c=np.array([-0.03, 11.78, 1.5, 1.49, 1.49, 1.49]),
+    )
+    with caplog.at_level(logging.WARNING):
+        apply_qc([cast])
+    [message] = [r.getMessage() for r in caplog.records]
+    assert "1383580" in message
+    assert "self-test resistor still connected" in message
 
 
 def test_test_probe_never_participates_in_the_speed_check():
