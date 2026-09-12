@@ -1094,3 +1094,155 @@ def test_position_on_land_check_also_applies_to_test_probe_casts():
     cast = _cast(serial_number="TestProbe", latitude=-42.8806, longitude=147.3250)
     [qc] = apply_qc([cast])
     assert "PL" in [h.qc_flag for h in qc.history]
+
+
+def _repeat_cast_pair(lat=-65.0, minutes=5.0, lat_offset=0.01, depths=None, temp_a=None, temp_b=None):
+    from datetime import timedelta
+    depths = np.array([50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0]) \
+        if depths is None else depths
+    temp_a = np.full(depths.size, 2.0) if temp_a is None else temp_a
+    temp_b = np.full(depths.size, 2.0) if temp_b is None else temp_b
+    earlier = _cast(
+        launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=lat, longitude=140.0,
+        depth_m=depths, temperature_c=temp_a,
+        sound_velocity_ms=np.full(depths.size, 1500.0), elapsed_s=np.arange(depths.size, dtype=float),
+    )
+    later = _cast(
+        launch_time=datetime(2025, 3, 1, 12, 0, 0) + timedelta(minutes=minutes),
+        latitude=lat + lat_offset, longitude=140.0,
+        depth_m=depths, temperature_c=temp_b,
+        sound_velocity_ms=np.full(depths.size, 1500.0), elapsed_s=np.arange(depths.size, dtype=float),
+    )
+    return earlier, later
+
+
+def test_repeat_cast_flags_the_warmer_cast_over_a_sustained_disagreement_ndo_792():
+    # Regression for NDO-792: modelled on the real cast 192/193 pair -- a
+    # sustained (>=10m), large (>3 degC) disagreement between two close,
+    # near-simultaneous real casts, with the warmer cast attributed as
+    # faulty (validated against all 12 real disagreeing pairs in the
+    # archive: every one was correctly the warmer member). 4.5 vs 1.0 degC
+    # (not a bigger jump) deliberately stays under the -65 degree latitude's
+    # own TEMP_SHALLOW_LATITUDE_BANDS_C ceiling (6.0 degC) and under the
+    # neighbour-average spike check's own boundary deviation (1.75 < 2.0),
+    # so only the check under test reacts.
+    earlier, later = _repeat_cast_pair(
+        temp_a=np.full(11, 1.0),
+        temp_b=np.array([1.0, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 1.0]),
+    )
+    [qc_earlier, qc_later] = apply_qc([earlier, later])
+    # The disagreeing run is depth 60-140m (9 grid points, 80m span) -- the
+    # first and last points agree (1.0 vs 1.0) so stay good on both sides.
+    assert list(qc_later.temperature_qc) == (
+        [GTSPP_GOOD] + [GTSPP_PROBABLY_BAD] * 9 + [GTSPP_GOOD]
+    )
+    assert np.all(qc_earlier.temperature_qc == GTSPP_GOOD)  # the sibling's own TEMP is untouched
+
+    [ws_later] = [h for h in qc_later.history if h.qc_flag == "WS"]
+    assert "disagree with a repeat cast" in ws_later.qc_flag_description
+    [ws_earlier] = [h for h in qc_earlier.history if h.qc_flag == "WS"]
+    assert "traced to the other cast" in ws_earlier.qc_flag_description
+    assert "no _qc change" in ws_earlier.qc_flag_description
+
+
+def test_repeat_cast_disagreement_within_threshold_stays_good():
+    from parse_xbt_edf import REPEAT_CAST_MAX_DELTA_C
+    earlier, later = _repeat_cast_pair(
+        temp_a=np.full(11, 2.0),
+        temp_b=np.full(11, 2.0 + REPEAT_CAST_MAX_DELTA_C),
+    )
+    results = apply_qc([earlier, later])
+    for qc in results:
+        assert np.all(qc.temperature_qc == GTSPP_GOOD)
+        assert "WS" not in [h.qc_flag for h in qc.history]
+
+
+def test_repeat_cast_disagreement_over_too_short_a_run_stays_good():
+    from parse_xbt_edf import REPEAT_CAST_MIN_RUN_M
+    # Only two adjacent grid points disagree -- 10m span exactly at the
+    # boundary is fine, but a shorter run below REPEAT_CAST_MIN_RUN_M must not flag.
+    depths = np.array([50.0, 55.0, 60.0, 65.0, 70.0])  # a 5m gap in the middle
+    earlier, later = _repeat_cast_pair(
+        depths=depths, temp_a=np.full(5, 1.0),
+        temp_b=np.array([1.0, 1.0, 4.5, 4.5, 1.0]),  # stays under the -65 deg shallow ceiling (6.0)
+    )
+    assert REPEAT_CAST_MIN_RUN_M > 5.0  # sanity: the disagreement run here (60-65m) is shorter
+    results = apply_qc([earlier, later])
+    for qc in results:
+        assert np.all(qc.temperature_qc == GTSPP_GOOD)
+
+
+def test_repeat_cast_check_does_not_apply_beyond_the_time_window():
+    from parse_xbt_edf import REPEAT_CAST_MAX_MINUTES
+    earlier, later = _repeat_cast_pair(
+        minutes=REPEAT_CAST_MAX_MINUTES + 1.0,
+        temp_a=np.full(11, 1.0),
+        temp_b=np.full(11, 4.5),  # stays under the -65 deg shallow ceiling (6.0)
+    )
+    results = apply_qc([earlier, later])
+    for qc in results:
+        assert np.all(qc.temperature_qc == GTSPP_GOOD)
+        assert "WS" not in [h.qc_flag for h in qc.history]
+
+
+def test_repeat_cast_check_does_not_apply_beyond_the_distance_window():
+    # ~11 km apart in 5 minutes is also an implausible speed, so the existing
+    # PE/TE speed check legitimately downgrades TEMP for its own, unrelated
+    # reason here -- this test only asserts the repeat-cast check itself
+    # (WS) didn't also fire, not that every check stayed quiet.
+    earlier, later = _repeat_cast_pair(
+        lat_offset=0.1,  # ~11 km -- beyond REPEAT_CAST_MAX_DISTANCE_KM
+        temp_a=np.full(11, 1.0),
+        temp_b=np.full(11, 4.5),  # stays under the -65 deg shallow ceiling (6.0)
+    )
+    results = apply_qc([earlier, later])
+    for qc in results:
+        assert "WS" not in [h.qc_flag for h in qc.history]
+
+
+def test_repeat_cast_check_does_not_apply_north_of_the_latitude_gate():
+    from parse_xbt_edf import REPEAT_CAST_MAX_LATITUDE_DEG
+    earlier, later = _repeat_cast_pair(
+        lat=REPEAT_CAST_MAX_LATITUDE_DEG + 1.0,  # north of the gate
+        temp_a=np.full(11, 1.0),
+        temp_b=np.full(11, 4.5),  # stays under the -65 deg shallow ceiling (6.0)
+    )
+    results = apply_qc([earlier, later])
+    for qc in results:
+        assert np.all(qc.temperature_qc == GTSPP_GOOD)
+        assert "WS" not in [h.qc_flag for h in qc.history]
+
+
+def test_repeat_cast_check_skips_over_a_test_probe_between_two_real_casts():
+    # The test probe sitting chronologically between earlier and later must not
+    # become "previous_real_qc" itself -- but earlier and later (5 min apart in
+    # total, within REPEAT_CAST_MAX_MINUTES) must still be compared directly,
+    # skipping over it, exactly as the speed check already does.
+    earlier, later = _repeat_cast_pair(temp_a=np.full(11, 1.0), temp_b=np.full(11, 4.5))
+    test_probe = _cast(
+        serial_number="TestProbe",
+        launch_time=datetime(2025, 3, 1, 12, 2, 0), latitude=-65.0, longitude=140.0,
+    )
+    [_, qc_test, qc_later] = apply_qc([earlier, test_probe, later])
+    assert "WS" not in [h.qc_flag for h in qc_test.history]
+    [ws] = [h for h in qc_later.history if h.qc_flag == "WS"]
+    assert "disagree with a repeat cast" in ws.qc_flag_description
+
+
+def test_repeat_cast_check_only_compares_samples_still_good_in_both_casts():
+    # A point already flagged bad by another check (here, an out-of-range value)
+    # must be excluded from the comparison entirely, not treated as a real 2.0.
+    from parse_xbt_edf import TEMP_VALID_MAX
+    depths = np.array([50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0])
+    earlier, later = _repeat_cast_pair(
+        depths=depths,
+        temp_a=np.array([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, TEMP_VALID_MAX + 1.0]),
+        temp_b=np.full(11, 2.0),
+    )
+    [qc_earlier, qc_later] = apply_qc([earlier, later])
+    # earlier's last point is already RC-bad on its own; the repeat-cast check must not
+    # also produce a WS entry for a point neither cast holds at GOOD.
+    assert qc_earlier.temperature_qc[-1] == GTSPP_PROBABLY_BAD
+    assert qc_later.temperature_qc[-1] == GTSPP_GOOD
+    assert "WS" not in [h.qc_flag for h in qc_earlier.history]
+    assert "WS" not in [h.qc_flag for h in qc_later.history]

@@ -234,6 +234,7 @@ KNOWN_PROBE_TYPES = {
 MAX_PLAUSIBLE_SPEED_KNOTS = 25.0
 TEST_PROBE_MAX_TEMPERATURE_VARIATION_C = 0.005
 _EARTH_RADIUS_NM = 3440.065
+_NM_TO_KM = 1.852
 
 # Canonical source for every published variable's valid range -- build_xbt_netcdf.py
 # imports these for its valid_min/valid_max NetCDF attributes rather than
@@ -363,6 +364,36 @@ TEMP_SHALLOW_LATITUDE_BANDS_C = (
     # North of -40 degrees: no additional tightening -- real warm-water transits make a flat
     # ceiling unsafe here, same reasoning TEMP_DEEP_BAND_DEPTH_M's own comment gives for depth.
 )
+
+# NDO-792: a whole-cast fault (e.g. cast 193) can be smooth and internally consistent enough that
+# no per-point check in this module can ever catch it -- it needs comparing against something
+# outside the cast itself. QC_COOKBOOK.md's own "Wire Stretch" entry (v1.1 sections 4.4/4.5)
+# already says this exact fault class "needs neighbour/repeat-drop confirmation" to tell apart
+# from a real inversion; this is that confirmation, applied to this ship's real relaunch pattern
+# (a failed cast gets immediately relaunched, not a deliberate calibration repeat-drop).
+#
+# Validated against the full real archive: of 29 real cast pairs within the window below, 12 have
+# one member ending in an already-caught range-check saturation, each with an uncaught smooth
+# warm ramp immediately above it -- exactly the Wire Stretch shape. The window itself is real-data
+# derived, not guessed: genuine relaunches span 3.8-13.4 minutes and 0.01-3.5 km (the ship keeps
+# steaming during a launch); nothing in the archive falls between 13.4 and 16.9 minutes, and the
+# first real-structure disagreements (thermocline depth genuinely differing between two drops)
+# appear at 6-10 km / 30-36 minutes. REPEAT_CAST_MAX_DELTA_C/MIN_RUN_M were set against the null
+# distribution of 17 genuinely clean tight pairs: the largest whole-profile offset was 0.66 degC
+# (inter-probe calibration-scale), the largest sustained real disagreement 1.95 degC over ~75 m
+# (thermocline displaced ~15 m between two drops), and no clean pair's contiguous >2 degC
+# disagreement ever reached 3 m, let alone the 10 m floor here -- roughly 1 degC of margin.
+# Re-applied, this rule flags exactly 12 pairs / 11 already-otherwise-suspect casts and zero clean
+# pairs. Gated to latitude <= REPEAT_CAST_MAX_LATITUDE_DEG (validated south of -40 only) -- the
+# archive has no real close pairs north of there to check against; tropical thermocline heave
+# could plausibly exceed this threshold over 10 m, the same reason
+# TEMP_SHALLOW_LATITUDE_BANDS_C stops at -40 too.
+REPEAT_CAST_MAX_MINUTES = 15.0
+REPEAT_CAST_MAX_DISTANCE_KM = 5.0
+REPEAT_CAST_MAX_LATITUDE_DEG = -40.0
+REPEAT_CAST_GRID_MATCH_TOLERANCE_M = 1.5
+REPEAT_CAST_MAX_DELTA_C = 3.0
+REPEAT_CAST_MIN_RUN_M = 10.0
 
 # GTSPP Real-Time QC Manual (IOC M&G No. 22)'s own spike-test threshold --
 # 10x looser than the CSIRO cookbook's 0.2 degC, which this pipeline
@@ -885,6 +916,148 @@ def _flag_temperature_shallow_latitude_band(qc: CastQC, now: datetime) -> None:
     ))
 
 
+def _good_real_depth_index(qc: CastQC):
+    """Returns (depths, sample_indices) for every TEMP sample still GTSPP_GOOD,
+    sorted by depth (already true of the underlying arrays, just filtered)."""
+    temp = qc.cast.temperature_c
+    depth = qc.cast.depth_m
+    mask = (qc.temperature_qc == GTSPP_GOOD) & ~np.isnan(temp) & ~np.isnan(depth)
+    idx = np.flatnonzero(mask)
+    return depth[idx], idx
+
+
+def _nearest_within(sorted_depths: np.ndarray, target: float, tolerance: float):
+    """Position in `sorted_depths` closest to `target`, or None if nothing is
+    within `tolerance`. `sorted_depths` must already be sorted ascending."""
+    if sorted_depths.size == 0:
+        return None
+    pos = np.searchsorted(sorted_depths, target)
+    candidates = [p for p in (pos - 1, pos) if 0 <= p < sorted_depths.size]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda p: abs(sorted_depths[p] - target))
+    return best if abs(sorted_depths[best] - target) <= tolerance else None
+
+
+def _flag_repeat_cast_disagreement(earlier_qc: CastQC, later_qc: CastQC, now: datetime) -> None:
+    """Flags a whole-cast TEMP fault too smooth and internally consistent for
+    any per-point check in this module to catch, by comparing a cast against
+    another real cast launched close enough in time and position that a
+    large, sustained disagreement can only mean one of them is wrong -- see
+    REPEAT_CAST_MAX_MINUTES's own module-level comment for the real-data
+    validation behind the window and thresholds chosen. Compares only
+    samples both casts still hold at GTSPP_GOOD after every check above this
+    one has run.
+
+    Attributes the fault to whichever cast reads warmer over a disagreeing
+    run -- validated against all 12 real disagreeing pairs found in the
+    archive, every one correctly the already-otherwise-suspect cast
+    (physically: the Wire Stretch/leakage fault this check exists for reads
+    spuriously warm; a cold-biased fault already goes off-scale and gets
+    caught by the range/spike checks long before this one runs). The other
+    cast gets an audit-only history entry -- deliberately not touching its
+    own temperature_qc, same reasoning _flag_wire_break_cascade already
+    documents for not penalising a cast merely for being someone else's
+    reference.
+
+    "WS" (Wire Stretch) is this module's own shorthand, not an official
+    cookbook/GTSPP code -- the cookbook cites this fault (v1.1 sections
+    4.4/4.5) but never assigns it one, unlike every other code in this file.
+    """
+    earlier, later = earlier_qc.cast, later_qc.cast
+    if max(earlier.latitude, later.latitude) > REPEAT_CAST_MAX_LATITUDE_DEG:
+        return
+    elapsed_minutes = (later.launch_time - earlier.launch_time).total_seconds() / 60.0
+    if not (0 < elapsed_minutes <= REPEAT_CAST_MAX_MINUTES):
+        return
+    distance_km = _haversine_nm(
+        earlier.latitude, earlier.longitude, later.latitude, later.longitude
+    ) * _NM_TO_KM
+    if distance_km > REPEAT_CAST_MAX_DISTANCE_KM:
+        return
+
+    depths_a, idx_a = _good_real_depth_index(earlier_qc)
+    depths_b, idx_b = _good_real_depth_index(later_qc)
+    if depths_a.size == 0 or depths_b.size == 0:
+        return
+
+    grid_lo = int(np.ceil(max(depths_a[0], depths_b[0])))
+    grid_hi = int(np.floor(min(depths_a[-1], depths_b[-1])))
+    if grid_hi < grid_lo:
+        return
+
+    matches = []  # (depth, temp_a, temp_b, sample_idx_a, sample_idx_b)
+    for g in range(grid_lo, grid_hi + 1):
+        pos_a = _nearest_within(depths_a, g, REPEAT_CAST_GRID_MATCH_TOLERANCE_M)
+        if pos_a is None:
+            continue
+        pos_b = _nearest_within(depths_b, g, REPEAT_CAST_GRID_MATCH_TOLERANCE_M)
+        if pos_b is None:
+            continue
+        sample_a, sample_b = idx_a[pos_a], idx_b[pos_b]
+        matches.append((
+            g, earlier.temperature_c[sample_a], later.temperature_c[sample_b], sample_a, sample_b,
+        ))
+    if not matches:
+        return
+
+    runs, current = [], []
+    for m in matches:
+        if abs(m[2] - m[1]) > REPEAT_CAST_MAX_DELTA_C:
+            current.append(m)
+        else:
+            if current:
+                runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+
+    for run in runs:
+        if run[-1][0] - run[0][0] < REPEAT_CAST_MIN_RUN_M:
+            continue
+        mean_a = float(np.mean([m[1] for m in run]))
+        mean_b = float(np.mean([m[2] for m in run]))
+        if mean_b > mean_a:
+            faulty_qc, sibling_qc = later_qc, earlier_qc
+            faulty_indices = sorted({m[4] for m in run})
+        else:
+            faulty_qc, sibling_qc = earlier_qc, later_qc
+            faulty_indices = sorted({m[3] for m in run})
+
+        faulty_indices = np.array(faulty_indices)
+        still_good = faulty_qc.temperature_qc[faulty_indices] == GTSPP_GOOD
+        if not np.any(still_good):
+            continue
+        flag_idx = faulty_indices[still_good]
+        faulty_qc.temperature_qc[flag_idx] = GTSPP_PROBABLY_BAD
+        flagged_depths = faulty_qc.cast.depth_m[flag_idx]
+        pair_description = f"{elapsed_minutes:.1f} min / {distance_km:.2f} km away"
+
+        faulty_qc.history.append(HistoryEntry(
+            institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+            software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+            start_depth=float(np.min(flagged_depths)), stop_depth=float(np.max(flagged_depths)),
+            qc_flag="WS",
+            qc_flag_description=(
+                f"{flag_idx.size} TEMP sample(s) disagree with a repeat cast launched "
+                f"{pair_description} by more than {REPEAT_CAST_MAX_DELTA_C} degC over "
+                f">= {REPEAT_CAST_MIN_RUN_M} m -- Wire Stretch/leakage signature "
+                "(CSIRO XBT QC Cookbook v1.1 sections 4.4/4.5)"
+            ),
+        ))
+        sibling_qc.history.append(HistoryEntry(
+            institution=_INSTITUTION, step=_QC_STEP, software=_SOFTWARE,
+            software_release=_SOFTWARE_RELEASE, date=now, parameter="TEMP",
+            start_depth=float(np.min(flagged_depths)), stop_depth=float(np.max(flagged_depths)),
+            qc_flag="WS",
+            qc_flag_description=(
+                f"Confirmed disagreement with a repeat cast launched {pair_description} traced "
+                "to the other cast -- this cast's own TEMP is unaffected (audit trail only, no "
+                "_qc change)"
+            ),
+        ))
+
+
 def _flag_spikes(qc: CastQC, now: datetime) -> None:
     """Flags a real TEMP value with no real data on either immediate side.
 
@@ -1140,6 +1313,7 @@ def apply_qc(casts: list) -> list:
     now = datetime.utcnow()
     results = []
     previous_real_cast = None
+    previous_real_qc = None
 
     for cast in ordered:
         is_test_probe = is_test_probe_cast(cast)
@@ -1219,7 +1393,6 @@ def apply_qc(casts: list) -> list:
                         start_depth=start_depth, stop_depth=stop_depth,
                         qc_flag="TE", qc_flag_description=f"Time error: {description}",
                     ))
-            previous_real_cast = cast
 
             if cast.probe_type_raw not in KNOWN_PROBE_TYPES:
                 # PR Reject (section 4.2.6/Table 2): metadata 3 to the original
@@ -1286,6 +1459,17 @@ def apply_qc(casts: list) -> list:
             qc, qc.longitude_qc, cast.longitude,
             LONGITUDE_VALID_MIN, LONGITUDE_VALID_MAX, "LONGITUDE", "degrees_east", now)
         _flag_position_on_land(qc, now)
+
+        if not is_test_probe:
+            # Compared against the PREVIOUS real cast's already-fully-finalised QC, not the
+            # raw Cast the speed check above used -- this needs every other check's verdict
+            # on both casts' TEMP samples, including this cast's own, which is why it runs
+            # last, and why previous_real_cast/previous_real_qc are only updated here rather
+            # than alongside the speed check.
+            if previous_real_qc is not None:
+                _flag_repeat_cast_disagreement(previous_real_qc, qc, now)
+            previous_real_cast = cast
+            previous_real_qc = qc
 
         results.append(qc)
 

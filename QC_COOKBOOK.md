@@ -34,6 +34,7 @@ running against real data, not by inspection.
   - [Speed check — PE / TE](#speed-check--pe--te-v11-section-424425)
   - [Probe-type check — PR](#probe-type-check--pr-v11-section-426)
   - [Physical-plausibility range check — RC](#physical-plausibility-range-check--rc)
+  - [Repeat Cast Disagreement — WS](#repeat-cast-disagreement--ws-v11-sections-4445-wire-stretch)
   - [Position on Land — PL](#position-on-land--pl-gtspp-real-time-qc-manual-test-14)
 - [Constants reference](#constants-reference)
 - [What we tried and rejected](#what-we-tried-and-rejected)
@@ -76,7 +77,7 @@ own, independent of `HISTORY_QC_FLAG`.
 | PR | [Probe-type check](#probe-type-check--pr-v11-section-426) | Real casts | PROBE_TYPE/TEMP/DEPTH → probably bad from surface | `FAULT_PROBE_TYPE_ERROR` | ✅ Implemented |
 | RC | [Range check](#physical-plausibility-range-check--rc) | All casts, per variable | Out-of-range points/profiles → probably bad | none | ✅ Implemented (TEMP depth-banded below 200 m since NDO-763, previously 1500 m; shallow band also latitude-banded south of -40° since NDO-790 — [details](#physical-plausibility-range-check--rc)) |
 | PL | [Position on Land](#position-on-land--pl-gtspp-real-time-qc-manual-test-14) (GTSPP/SeaDataNet/SAMOS, not CSIRO) | All casts, incl. self-test | LATITUDE/LONGITUDE → probably bad | none | ✅ Implemented |
-| — | Wire Stretch (§4.4/4.5) | — | — | — | ❌ Not automated — usually still caught indirectly via `SOUND_VELOCITY` RC ([details](#what-we-tried-and-rejected)) |
+| WS | [Repeat Cast Disagreement](#repeat-cast-disagreement--ws-v11-sections-4445-wire-stretch) (Wire Stretch, §4.4/4.5) | Real casts with a close real neighbour, latitude ≤ -40° | TEMP → probably bad, warmer cast only | none | ✅ Implemented (NDO-792 — not an official cookbook/GTSPP code, [details](#repeat-cast-disagreement--ws-v11-sections-4445-wire-stretch)) |
 | SPR | Severe multi-point spiking (§3.3) | — | — | — | ❌ Not implemented — see [Open questions](#open-questions) |
 
 ## Checks implemented
@@ -496,6 +497,64 @@ transits (the ship crosses the tropics) make a flat ceiling unsafe there. A faul
 of -40° would still slip through uncaught — an accepted, documented gap, not an oversight — see
 [Open questions](#open-questions).
 
+### Repeat Cast Disagreement — WS (v1.1 sections 4.4/4.5, "Wire Stretch")
+
+**Status:** Implemented (NDO-792). **"WS" is this module's own shorthand, not an official
+cookbook/GTSPP code** — unlike every other code in this document, the cookbook cites this fault
+but never assigns it a two-letter code of its own.
+
+Every other check in this document looks at one cast in isolation. Some faults can't be caught
+that way at all: a whole cast can be smooth and internally consistent enough — a real, coherent
+water-mass shape, just apparently the wrong one for exactly when and where it claims to have been
+taken — that no per-point check will ever flag a single sample. Cast 193 in the real archive is
+exactly this: a genuine-looking ~9°C water column at 200-620 m, 54.5°S, that disagrees by 3-9°C
+with cast 192, launched at the same position only 4.5 minutes earlier. This is precisely the
+cookbook's own "Wire Stretch" fault (v1.1 §4.4/4.5) — a sustained, real-looking trend that its own
+text says "needs neighbour/repeat-drop confirmation" to tell apart from a real inversion. This
+check *is* that confirmation, built around this ship's own real relaunch pattern (a cast that
+fails gets immediately relaunched — this is not a deliberate calibration repeat-drop).
+
+**The rule:** for a cast with a real neighbour launched within `REPEAT_CAST_MAX_MINUTES` (15 min)
+and `REPEAT_CAST_MAX_DISTANCE_KM` (5 km), interpolate both casts' still-`GTSPP_GOOD` TEMP onto a
+1 m grid (a grid depth counts only if *both* casts have a good sample within
+`REPEAT_CAST_GRID_MATCH_TOLERANCE_M` — no bridging across a gap one cast has already had flagged),
+and flag a contiguous run of `>= REPEAT_CAST_MIN_RUN_M` (10 m) where the two disagree by more than
+`REPEAT_CAST_MAX_DELTA_C` (3.0°C). The window itself is real-data derived, not guessed: genuine
+relaunches in the archive span 3.8-13.4 minutes and 0.01-3.5 km (the ship keeps steaming during a
+launch); nothing falls between 13.4 and 16.9 minutes, and the first real disagreements between two
+close-but-genuinely-different casts (thermocline depth actually differing between two drops)
+appear at 6-10 km / 30-36 minutes — outside the window on both counts.
+
+**Validated against 17 genuinely clean tight pairs** (the null distribution): the largest
+whole-profile offset was 0.66°C (inter-probe calibration-scale), the largest sustained real
+disagreement 1.95°C over ~75 m (a thermocline genuinely displaced ~15 m between two drops), and no
+clean pair's contiguous >2°C disagreement ever reached 3 m, let alone the 10 m floor — roughly 1°C
+of margin under the 3.0°C threshold. Re-applied against the full archive, this rule flags exactly
+12 disagreeing pairs / 11 casts (`38, 156, 169, 173, 175, 179, 183, 187, 193, 348, 361`) and zero
+clean pairs.
+
+**Attribution and consequence.** Whichever cast reads *warmer* over a disagreeing run is flagged
+`GTSPP_PROBABLY_BAD` there; the sibling gets an audit-only history entry (no `_qc` change) — the
+same precedent `_flag_wire_break_cascade` already established for not penalising a cast merely for
+being someone else's reference. Validated against all 12 real disagreeing pairs: the warmer cast
+was correctly the already-otherwise-suspect one in every single case — physically, Wire
+Stretch/leakage faults read spuriously warm, and a cold-biased fault already goes off-scale and is
+caught by the range/spike checks long before this one runs. Flagging both casts was tried and
+rejected: it would cost 1,583 good samples across nine otherwise-clean siblings for no gain, since
+attribution alone already correctly separates all 12 known cases.
+
+**Gated to latitude ≤ `REPEAT_CAST_MAX_LATITUDE_DEG` (-40°)** — the archive has no real close pairs
+north of there to validate against, and tropical thermocline heave could plausibly exceed this
+threshold over 10 m, the same reason `TEMP_SHALLOW_LATITUDE_BANDS_C` stops at -40° too.
+
+**What this doesn't catch, reported plainly rather than forced:** a pair whose disagreement peaks
+just under the 3.0°C threshold (one real archive case, 2.83°C, left unflagged — plausibly a leaky
+probe, not confirmable from the data alone); a suspected whole-tail fault outside the 15-minute
+window (36 minutes away in the one real case found); a fault north of -40° (no validation data
+exists there); and, structurally, any fault in a cast with no real close neighbour to compare
+against at all — most casts in the archive have none. See [Open questions](#open-questions) for
+the specific cases.
+
 ### Position on Land — PL (GTSPP Real-Time QC Manual test 1.4)
 
 **Status:** Implemented (NDO-704). **This check's provenance is different from every other
@@ -547,6 +606,10 @@ be checked against each other without reading the source.
 | `TEMP_DEEP_VALID_MAX` | 20.0°C | Range check (RC), depths ≥ 200 m | Real-data statistical gap, this ship's own archive — same source as `TEMP_DEEP_BAND_DEPTH_M` |
 | `TEMP_TERMINAL_DEFLECTION_MAX_DELTA_C` | 5.0°C | Terminal Deflection (WB) | Real-data validation, this ship's own archive (NDO-763) — narrow margin (4.73°C closest real-ish case, itself a separate uncaught fault), see [above](#terminal-deflection--wb-v11-section-32-same-citation-as-wire-break-cascade) |
 | `TEMP_SHALLOW_LATITUDE_BANDS_C` | 6.0-20.0°C by latitude band | Range check (RC), depths 3.6-200m | Real-data statistical gap, this ship's own archive (NDO-790), see [above](#shallower-than-200-m-is-latitude-banded-too-south-of--40-ndo-790) — margin ≥2.4°C in every band |
+| `REPEAT_CAST_MAX_MINUTES` / `_MAX_DISTANCE_KM` | 15 min / 5 km | Repeat Cast Disagreement (WS) | Real relaunch pattern, this ship's own archive (NDO-792) — genuine relaunches span 3.8-13.4 min / 0.01-3.5 km, nothing between 13.4-16.9 min |
+| `REPEAT_CAST_MAX_LATITUDE_DEG` | -40° | Repeat Cast Disagreement (WS) | No real close pairs north of here to validate against (NDO-792) — same reasoning as `TEMP_SHALLOW_LATITUDE_BANDS_C` |
+| `REPEAT_CAST_GRID_MATCH_TOLERANCE_M` | 1.5 m | Repeat Cast Disagreement (WS) | Engineering choice (typical XBT sample spacing), not separately validated |
+| `REPEAT_CAST_MAX_DELTA_C` / `_MIN_RUN_M` | 3.0°C / 10 m | Repeat Cast Disagreement (WS) | Real-data validation against 17 clean tight pairs, this ship's own archive (NDO-792) — ~1°C margin, see [above](#repeat-cast-disagreement--ws-v11-sections-4445-wire-stretch) |
 | `SPIKE_NEIGHBOUR_AVERAGE_MAX_DELTA_C` | 2.0°C | Neighbour-average Spikes retest (SP) | GTSPP Real-Time QC Manual (IOC M&G No. 22), not the cookbook's own 0.2°C (rejected — see [below](#what-we-tried-and-rejected)) |
 | `LATITUDE_VALID_MIN` / `_MAX` | −90° / 90° | Range check (RC) | Physical bound |
 | `LONGITUDE_VALID_MIN` / `_MAX` | −180° / 180° | Range check (RC) | Physical bound |
@@ -630,13 +693,18 @@ falsifiable, is.
 
 **"Wire Stretch" (v1.1 sections 4.4/4.5)** — a sustained, real-looking
 warming trend with depth over a wide range — was found in the same real
-data (a ~7°C ramp over 33 m, suspiciously close to perfectly linear) but
-was **not automated at all**. The cookbook's own text is explicit that
-telling a genuine wire stretch apart from a real temperature inversion
+data (a ~7°C ramp over 33 m, suspiciously close to perfectly linear) and,
+at the time, **not automated at all**. The cookbook's own text is explicit
+that telling a genuine wire stretch apart from a real temperature inversion
 needs neighbour/repeat-drop confirmation: "the approach... is to be
 conservative... only those features that have been confirmed... are
-flagged as real." A cast with this fault shape isn't left completely
-unflagged in practice, though — `SOUND_VELOCITY` is computed from the same
+flagged as real." **That confirmation was built 2026-09-13 (NDO-792) — see
+[Repeat Cast Disagreement](#repeat-cast-disagreement--ws-v11-sections-4445-wire-stretch)
+above** — but only for a cast with a real, close-in-time-and-position
+neighbour to confirm against; most casts have none, so this shape still
+isn't caught in general. A cast with this fault shape isn't left completely
+unflagged in practice even without a repeat-cast neighbour, though —
+`SOUND_VELOCITY` is computed from the same
 corrupted temperature, so it usually still trips the existing
 `SOUND_VELOCITY` range check (confirmed: it did, in the found case). TEMP
 itself also usually catches it, but only by accident: NDO-727 confirmed
@@ -762,16 +830,23 @@ case ever turns up at a temperature the isothermal check doesn't already cover.
   would still slip through uncaught. An SST-climatology-validated ceiling (rather than the coarse
   latitude bins used here) would be the natural next step if a real case ever turns up there —
   not attempted, since NDO-790 had no confirmed real case north of -40° to validate against.
-- **A whole-cast fault that no per-point check can catch, found during NDO-763.** Cast 193
-  (54.5°S) reads a near-isothermal ~17-21°C water column from the surface to 740 m, 693 samples
-  still "good" — while cast 192, the same position 4.5 minutes earlier, reads 3.8-4.9°C
-  near-surface. This is the same real cast already discussed in the NDO-686 WOA-climatology
-  rejection above (there, framed as "confirmed physically sane 9-13°C water... a real ~7-10°C
-  offset from a shifted front") — re-examined for NDO-763, the *worked example* used to justify
-  that conclusion doesn't hold up against its own immediately-preceding cast. WOA's
-  sparse-sampling problem (the actual reason that approach was rejected) still stands on its own;
-  this specific supporting example doesn't. Only a repeat-drop/neighbouring-cast consistency
-  check could catch this class of fault — not implemented.
+- **Resolved 2026-09-13 (NDO-792), with a correction to how it was first framed.** Found during
+  NDO-763: cast 193 (54.5°S) was described as reading "a near-isothermal ~17-21°C water column
+  from the surface to 740m" — **that description was wrong**, corrected during NDO-792's own
+  investigation. The cast actually reads ~9°C over 200-620 m (matching the NDO-686 WOA-rejection
+  writeup's own "confirmed physically sane 9-13°C water" description, not contradicting it); the
+  17-21°C values only exist in the cast's fault tail below ~630 m. It's still a genuine whole-cast
+  fault — the transect context is decisive (cast 191, 2 days earlier at 58.4°S, reads 2.4°C; cast
+  194, a day later at 51.6°S, reads 6.3°C at the surface; 193's 12-15°C at 25-75 m, three degrees
+  *south* of 194, is physically impossible) — just not the shape first reported. **Cast 192 (the
+  cast this was originally compared against as a clean reference) turned out to be faulty too** —
+  it warms with depth from 4.5°C to 8.8°C, then terminates in a saturation ramp — it was relaunched
+  as 193 *because it had just failed*, not as a deliberate repeat-drop.
+  See [Repeat Cast Disagreement](#repeat-cast-disagreement--ws-v11-sections-4445-wire-stretch)
+  above for the fix that now catches both. **Generalises past this one cast:** re-verify a
+  described data shape against the actual archive before designing a fix around it, even when the
+  description comes from this document's own prior investigation — the WOA-rejection's underlying
+  argument (sparse sampling) was never wrong, only one of its two supporting worked examples was.
 - **Resolved 2026-09-13 (NDO-791), with a correction to how it was first framed.** NDO-763
   flagged "cast 0" (`202324VT1A`, 32.4°C → 3.8°C → pinned ~1.5°C for ~700 samples) as evading
   `is_test_probe_cast()`. On investigation, that specific cast turned out to be a non-issue in
@@ -785,6 +860,27 @@ case ever turns up at a temperature the isothermal check doesn't already cover.
   still reproduces against current code before designing a fix around it — the symptom described
   can be real (something *was* wrong) while the specific example cited for it is an artefact of
   stale data.
+- **An ambiguous repeat-cast pair, found during NDO-792, left unflagged rather than forced.** Two
+  real casts 7.8 minutes / 0.9 km apart at 64°S disagree by up to 2.83°C over two separate depth
+  ranges — real, but under `REPEAT_CAST_MAX_DELTA_C` (3.0°C), and the warmer cast independently
+  dies in an unrelated fault at 675 m. Plausibly a leaky probe; not confirmable from the data alone
+  without loosening the threshold below the margin the null-distribution validation supports.
+  Documented, not fixed.
+- **A likely whole-tail fault outside the Repeat Cast Disagreement window, found during NDO-792.**
+  Two real casts 36 minutes apart (outside `REPEAT_CAST_MAX_MINUTES`) show one reading noisy
+  +0.3 to 2.1°C from 425-775 m where its neighbour (and a second, independent cast at the same
+  position 3 hours later) both read a consistent -1.75°C. Structurally uncatchable by this check
+  as validated — widening the time window was tried and rejected (it admits at least one genuine
+  false/unresolvable positive elsewhere in the archive, a pair whose mixed-layer base genuinely
+  differs by 15 m between two real drops 10 km apart).
+- **A byte-identical duplicate profile, found during NDO-792, not this ticket's problem to fix.**
+  Casts 85 and 86 in the archive share the same launch timestamp and an identical TEMP array — a
+  data-management bug (the same cast published twice), not a QC-flagging one. `XBT_fault_and_
+  feature_flag_type`'s Appendix F already defines a `duplicate_profile` bit (see this module's own
+  Appendix F citation) for exactly this; nothing in this pipeline currently sets it. A candidate
+  fix (detect and flag/drop an exact-duplicate profile before QC even runs) needs its own
+  investigation into where in the backfill/build pipeline the duplication is actually introduced —
+  not attempted here.
 
 ## References
 
