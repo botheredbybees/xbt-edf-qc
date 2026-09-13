@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xbt-edf-qc"
-version = "0.1.0"
+version = "0.2.0"
 description = "Parses Sippican/Lockheed Martin MK21 XBT EDF cast files, applies CSIRO XBT QC Cookbook checks, and builds CF-1.6/IMOS-1.4 profile NetCDF files."
 readme = "README.md"
 license = { file = "LICENSE" }

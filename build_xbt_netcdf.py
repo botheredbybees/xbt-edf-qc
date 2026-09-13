@@ -18,8 +18,13 @@ from parse_xbt_edf import (
     LATITUDE_VALID_MIN,
     LONGITUDE_VALID_MAX,
     LONGITUDE_VALID_MIN,
+    REPEAT_CAST_MAX_LATITUDE_DEG,
     SOUND_VELOCITY_VALID_MAX,
     SOUND_VELOCITY_VALID_MIN,
+    SURFACE_TRANSIENT_DEPTH_M,
+    TEMP_DEEP_BAND_DEPTH_M,
+    TEMP_DEEP_VALID_MAX,
+    TEMP_SHALLOW_LATITUDE_BANDS_C,
     TEMP_VALID_MAX,
     TEMP_VALID_MIN,
 )
@@ -31,6 +36,15 @@ _QC_FLAG_MEANINGS = (
     "Not_used Not_used Not_used Missing_value"
 )
 _QC_FILL_VALUE = 99
+# NDO-767: the array below used to be initialised with np.zeros(...) and never given a
+# distinct fill value -- 0 is also this variable's own legitimate "no fault" value (the
+# overwhelming majority of real samples), so a CF-decoding reader (xarray's default,
+# ERDDAP, Panoply) saw the whole variable as ~99.6% missing on the real archive. The
+# maximum representable uint32 is used as the fill, matching the _QC_FILL_VALUE/
+# depth_qc/temp_qc/sound_velocity_qc pattern already used elsewhere in this function
+# (initialise every cell to the fill value, then overwrite only the real [:n] range) --
+# this variable had simply never followed that same pattern.
+_FAULT_FLAGS_FILL_VALUE = np.uint32(2**32 - 1)
 
 # A real cast can trigger at most 13 QC history entries: the surface-spike
 # check emits 1 (CS), the speed check emits 2 (PE and TE -- an automated
@@ -115,7 +129,7 @@ def build_xbt_netcdf(casts_qc: list, voyage: str = None,
     temp_qc = np.full((n_profiles, max_depth), _QC_FILL_VALUE, dtype="uint8")
     sound_velocity_qc = np.full((n_profiles, max_depth), _QC_FILL_VALUE, dtype="uint8")
     depth_qc = np.full((n_profiles, max_depth), _QC_FILL_VALUE, dtype="uint8")
-    fault_flags = np.zeros((n_profiles, max_depth), dtype="uint32")
+    fault_flags = np.full((n_profiles, max_depth), _FAULT_FLAGS_FILL_VALUE, dtype="uint32")
 
     history_institution = np.full((n_profiles, _N_HISTORY), "", dtype=object)
     history_step = np.full((n_profiles, _N_HISTORY), "", dtype=object)
@@ -210,6 +224,22 @@ def build_xbt_netcdf(casts_qc: list, voyage: str = None,
             "units": "Celsius", "coordinates": "TIME LATITUDE LONGITUDE DEPTH_VALUES",
             "valid_min": TEMP_VALID_MIN, "valid_max": TEMP_VALID_MAX,
             "ancillary_variables": "TEMP_quality_control",
+            # NDO-766: valid_min/valid_max alone understate this variable's real QC --
+            # the flat bound they describe is only the shallow-band case. See
+            # QC_COOKBOOK.md's "Physical-plausibility range check" section for the full
+            # real-data validation behind every number named here.
+            "comment": (
+                f"valid_min/valid_max are the flat bound enforced for depth < "
+                f"{TEMP_DEEP_BAND_DEPTH_M} m (and, north of {-REPEAT_CAST_MAX_LATITUDE_DEG} "
+                f"degrees latitude, for all depths). Deeper than {TEMP_DEEP_BAND_DEPTH_M} m, "
+                f"a {TEMP_DEEP_VALID_MAX} degC ceiling is also enforced. South of "
+                f"{-REPEAT_CAST_MAX_LATITUDE_DEG} degrees latitude, between "
+                f"{SURFACE_TRANSIENT_DEPTH_M} m and {TEMP_DEEP_BAND_DEPTH_M} m, a "
+                f"latitude-banded ceiling (as low as "
+                f"{min(c for _, c in TEMP_SHALLOW_LATITUDE_BANDS_C)} degC) is also enforced. "
+                "See TEMP_quality_control and HISTORY_QC_FLAG 'RC' entries for exactly which "
+                "bound applied to a given sample."
+            ),
         }),
         "TEMP_quality_control": (("PROFILE", "DEPTH"), temp_qc, _qc_attrs("sea_water_temperature")),
         "SOUND_VELOCITY": (("PROFILE", "DEPTH"), sound_velocity, {
@@ -221,7 +251,10 @@ def build_xbt_netcdf(casts_qc: list, voyage: str = None,
         "SOUND_VELOCITY_quality_control": (("PROFILE", "DEPTH"), sound_velocity_qc, _qc_attrs("sound_velocity")),
         "XBT_fault_and_feature_flag_type": (("PROFILE", "DEPTH"), fault_flags, {
             "long_name": "XBT_fault_and_feature_flag",
-            "_FillValue": np.uint32(0),
+            # NDO-767: was np.uint32(0) -- see _FAULT_FLAGS_FILL_VALUE's own comment above.
+            # Also now correctly outside valid_min/valid_max, the standard CF pattern (a fill
+            # value inside the valid range, as 0 was, is itself a recognised CF anti-pattern).
+            "_FillValue": _FAULT_FLAGS_FILL_VALUE,
             "valid_min": np.uint32(0),
             # Appendix F states valid_max = 65536, but that is internally
             # inconsistent with its own flag_values list, which runs up to

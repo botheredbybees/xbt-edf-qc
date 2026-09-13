@@ -81,6 +81,19 @@ def test_unreadable_file_raises_edf_parse_error(tmp_path):
         parse_edf(str(missing), voyage_id="202425030")
 
 
+def test_mismatched_num_data_fields_raises_edf_parse_error_ndo_767(tmp_path):
+    # NDO-767: the header's own declared field count must match what this
+    # parser expects. Before this fix, a 6-column export silently shifted
+    # every column one to the left (elapsed_s reading resistance's values,
+    # depth_m reading temperature's, etc.) with no error at all.
+    real = (FIXTURES / "real_cast.edf").read_text(encoding="cp1252")
+    misaligned = real.replace("Num Data Fields  :  5", "Num Data Fields  :  6")
+    edf_path = tmp_path / "misaligned.edf"
+    edf_path.write_text(misaligned, encoding="cp1252")
+    with pytest.raises(EDFParseError, match="Num Data Fields"):
+        parse_edf(str(edf_path), voyage_id="202425030")
+
+
 def test_parses_test_probe_cast_without_special_casing():
     cast = parse_edf(str(FIXTURES / "test_probe_cast.edf"), voyage_id="202425030")
     assert cast.probe_type_raw == "TestProbe"

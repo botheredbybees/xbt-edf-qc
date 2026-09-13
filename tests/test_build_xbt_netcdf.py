@@ -21,8 +21,8 @@ def _cast(**overrides):
         longitude=149.0,
         serial_number="123",
         voyage_id="202425030",
-        # Beyond SURFACE_SPIKE_DEPTH_M (3.7 m) so the surface-spike QC check
-        # doesn't incidentally strip TEMP in tests that aren't about it.
+        # Beyond SURFACE_TRANSIENT_DEPTH_M (3.6 m) so the Surface Transient QC check
+        # doesn't incidentally flag TEMP in tests that aren't about it.
         depth_m=np.array([10.0, 11.0, 12.0]),
         temperature_c=np.array([10.0, 9.5, 9.0]),
         sound_velocity_ms=np.array([1500.0, 1500.1, 1500.2]),
@@ -194,12 +194,34 @@ def test_fault_flag_variable_has_cf_flag_attributes():
     attrs = ds["XBT_fault_and_feature_flag_type"].attrs
     assert list(attrs["flag_values"]) == [131072, 262144, 1048576, 2097152]
     assert attrs["flag_meanings"] == "time_error position_error test_probe probe_type_error"
-    assert attrs["_FillValue"] == 0
+    # NDO-767: was 0 -- also this variable's own legitimate "no fault" value, so a
+    # CF-decoding reader saw ~99.6% of the real archive as missing. Now the max uint32,
+    # clearly outside valid_min/valid_max (see _FAULT_FLAGS_FILL_VALUE's own comment).
+    assert attrs["_FillValue"] == 2**32 - 1
     assert attrs["valid_min"] == 0
     # Appendix F's own valid_max of 65536 does not cover its own flag_values,
     # which reach 2097152 -- a defect in the cookbook. Published as the real
     # maximum of the values this variable can actually hold.
     assert attrs["valid_max"] == 2097152
+
+
+def test_fault_flag_padding_is_distinguishable_from_real_no_fault_data_ndo_767():
+    # Regression for NDO-767: a shorter cast's padded DEPTH range used to be
+    # indistinguishable (both 0) from a real, faultless sample. A shorter cast
+    # alongside a longer one exercises real padding.
+    short = _cast(
+        depth_m=np.array([10.0, 11.0]), temperature_c=np.array([5.0, 5.0]),
+        sound_velocity_ms=np.array([1500.0, 1500.1]), elapsed_s=np.array([0.0, 0.1]),
+    )
+    long = _cast(
+        depth_m=np.array([10.0, 11.0, 12.0]), temperature_c=np.array([5.0, 5.0, 5.0]),
+    )
+    ds = build_xbt_netcdf(apply_qc([short, long]))
+    flags = ds["XBT_fault_and_feature_flag_type"].values
+    assert flags[0, 0] == 0  # short cast's real, faultless sample
+    assert flags[0, 1] == 0  # short cast's real, faultless sample
+    assert flags[0, 2] == ds["XBT_fault_and_feature_flag_type"].attrs["_FillValue"]  # padding
+    assert np.all(flags[1] == 0)  # long cast has no padding at all
 
 
 def test_fault_flag_attrs_are_uint32_matching_the_variable_dtype():
@@ -227,6 +249,18 @@ def test_temp_valid_range_matches_appendix_f():
     ds = build_xbt_netcdf(apply_qc([_cast()]))
     assert ds["TEMP"].attrs["valid_min"] == -2.5
     assert ds["TEMP"].attrs["valid_max"] == 40.0
+
+
+def test_temp_comment_documents_the_depth_and_latitude_banded_ceilings_ndo_766():
+    # NDO-766: valid_min/valid_max alone describe only the shallow-band flat
+    # bound -- the comment attribute is what tells a reader depth/latitude
+    # banding also applies, so the metadata doesn't silently understate the
+    # real QC every published sample went through.
+    ds = build_xbt_netcdf(apply_qc([_cast()]))
+    comment = ds["TEMP"].attrs["comment"]
+    assert "200" in comment  # TEMP_DEEP_BAND_DEPTH_M
+    assert "20" in comment  # TEMP_DEEP_VALID_MAX
+    assert "6" in comment  # the tightest TEMP_SHALLOW_LATITUDE_BANDS_C ceiling
 
 
 def test_history_variables_cite_their_gtspp_code_tables():

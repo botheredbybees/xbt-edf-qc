@@ -135,6 +135,21 @@ def test_plausible_speed_between_casts_stays_good():
     assert qc_second.history == []
 
 
+def test_speed_check_failure_does_not_become_the_next_casts_reference_ndo_764():
+    # Regression for NDO-764, modelled on the real voyage 202324020 case: A is
+    # genuinely fine, B is a hemisphere-flipped position that fails speed
+    # against A (and is correctly flagged for it), and C is a real, plausible
+    # cast whose speed FROM A alone is fine -- it must not be measured
+    # against B's known-bad position and downgraded for someone else's fault.
+    a = _cast(launch_time=datetime(2025, 3, 1, 12, 0, 0), latitude=-42.0, longitude=149.0)
+    b = _cast(launch_time=datetime(2025, 3, 1, 12, 10, 0), latitude=42.0, longitude=-149.0)
+    c = _cast(launch_time=datetime(2025, 3, 2, 12, 0, 0), latitude=-42.2, longitude=149.0)
+    qc_a, qc_b, qc_c = apply_qc([a, b, c])
+    assert qc_b.history and qc_b.history[0].qc_flag == "PE"  # B correctly caught
+    assert qc_c.history == []  # C must not inherit B's failure
+    assert np.all(qc_c.temperature_qc == GTSPP_GOOD)
+
+
 def test_unrecognised_probe_type_flags_probe_type_error():
     [qc] = apply_qc([_cast(probe_type_raw="NotARealProbe", probe_type="NotARealProbe")])
     assert qc.probe_type_qc == GTSPP_PROBABLY_BAD
@@ -452,6 +467,20 @@ def test_history_previous_value_is_never_repurposed_as_a_diagnostic():
             assert np.isnan(entry.previous_value), entry.qc_flag
 
 
+def test_software_release_reflects_the_installed_package_version_ndo_766():
+    # NDO-766: this used to be hardcoded "1.0" regardless of which release's
+    # QC actually ran. Falls back to a distinguishable placeholder (not a
+    # crash) when the package isn't installed at all, e.g. running straight
+    # from a git clone with no `pip install -e .` -- this local dev checkout
+    # exercises exactly that path.
+    from parse_xbt_edf import _SOFTWARE, _SOFTWARE_RELEASE
+    assert _SOFTWARE == "xbt-edf-qc/parse_xbt_edf.py"
+    assert _SOFTWARE_RELEASE  # never empty/None
+    [qc] = apply_qc([_cast(probe_type_raw="NotARealProbe", probe_type="NotARealProbe")])
+    [entry] = qc.history
+    assert entry.software_release == _SOFTWARE_RELEASE
+
+
 def test_known_probe_type_stays_good():
     [qc] = apply_qc([_cast(probe_type_raw="T5", probe_type="T5")])
     assert qc.probe_type_qc == GTSPP_GOOD
@@ -498,6 +527,37 @@ def test_test_probe_identified_by_a_different_serial_number_spelling():
     # substring match on "test" catches all of them without an exact allow-list.
     [qc] = apply_qc([_cast(serial_number="BT_Test_Device")])
     assert qc.probe_type_qc == GTSPP_GOOD  # never reaches the probe-type check at all
+
+
+def test_test_probe_still_matches_testprobe_glued_to_a_filename_timestamp_ndo_765():
+    # The real, historically important case: "test" is preceded only by an
+    # underscore (a word character, so a naive \b-based match would miss it),
+    # never by another letter.
+    [qc] = apply_qc([_cast(source_file="VT1A_testprobe20230807033912.edf")])
+    assert qc.probe_type_qc == GTSPP_GOOD
+
+
+@pytest.mark.parametrize("memo", ["Latest DB drop before station 12", "contest", "attest", "protest"])
+def test_memo_words_containing_test_are_not_misidentified_as_a_self_test_ndo_765(memo):
+    cast = _cast(memo=memo)
+    assert not is_test_probe_cast(cast)
+
+
+def test_memo_test_as_a_standalone_word_still_flags_a_self_test_ndo_765():
+    # "test" glued onto real words (Latest/contest/...) is excluded above, but
+    # "test" as its own word anywhere in the Memo is still treated the same
+    # cautious way every other real spelling is -- erring towards excluding a
+    # cast that shouldn't be published as real data.
+    assert is_test_probe_cast(_cast(memo="test station 12"))
+
+
+def test_test_probe_exclusion_is_logged_naming_the_matching_field_ndo_765(caplog):
+    import logging
+    with caplog.at_level(logging.INFO):
+        apply_qc([_cast(serial_number="TestProbe")])
+    [record] = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert "serial_number" in record.getMessage()
+    assert "TestProbe" in record.getMessage()
 
 
 def test_test_probe_is_never_flagged_as_unrecognised_probe_type():
@@ -773,6 +833,21 @@ def test_temperature_both_bands_bad_produces_two_separate_rc_entries():
     rc_entries = [e for e in qc.history if e.qc_flag == "RC" and e.parameter == "TEMP"]
     assert len(rc_entries) == 2
     assert list(qc.temperature_qc) == [GTSPP_PROBABLY_BAD, GTSPP_PROBABLY_BAD]
+
+
+def test_temperature_with_a_nan_depth_is_not_judged_against_either_band_ndo_767():
+    # Regression for NDO-767: `deep = ~shallow` used to make `NaN < X` (always
+    # False) invert to True, judging a row with an unknown depth against the
+    # tighter deep-band ceiling. depth_qc already correctly flags this row
+    # GTSPP_MISSING -- TEMP must be left alone, not guessed at.
+    cast = _cast(
+        depth_m=np.array([10.0, np.nan, 12.0]),
+        temperature_c=np.array([24.0, 25.0, 26.0]),
+        latitude=0.0,  # north of every TEMP_SHALLOW_LATITUDE_BANDS_C band -- not what this test is about
+    )
+    [qc] = apply_qc([cast])
+    assert list(qc.temperature_qc) == [GTSPP_GOOD, GTSPP_GOOD, GTSPP_GOOD]
+    assert qc.depth_qc[1] == GTSPP_MISSING
 
 
 def test_temperature_mid_depth_fault_plateau_now_flagged_ndo_763():

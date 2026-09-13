@@ -66,7 +66,7 @@ own, independent of `HISTORY_QC_FLAG`.
 | Code | Check | Applies to | Effect | Appendix F bit | Status |
 |---|---|---|---|---|---|
 | — | [Test Probe detection](#test-probe-detection-not-a-per-point-check-but-gates-everything-else) | All casts | Excludes self-test casts from output | `FAULT_TEST_PROBE` | ✅ Implemented (gate) |
-| TP | ↳ failed self-test | Self-test casts only | Warning logged, not a QC flag | `FAULT_TEST_PROBE` | ✅ Implemented |
+| TP | ↳ failed self-test | Self-test casts only | Recorder-health warning logged, *and* the whole cast's TEMP → probably bad (NDO-767: corrected from "not a QC flag" — the cast is excluded from the published archive either way, but its own `temperature_qc`/history are still downgraded, not left as-is) | `FAULT_TEST_PROBE` | ✅ Implemented |
 | CS | [Surface Transients](#surface-transients--cs-v21-section-431-supersedes-v11-section-21s-csa) | Real casts | TEMP → probably bad above 3.6 m, value retained | none | ✅ Implemented (current v2.1 methodology since NDO-729 — was shipping deprecated v1.1 CSA, [details](#surface-transients--cs-v21-section-431-supersedes-v11-section-21s-csa)) |
 | CS (Reject / CSR) | ↳ transient below 3.6 m | — | — | — | ❌ Not implemented — needs operator judgement |
 | SP | [Isolated readings](#isolated-readings-with-no-real-neighbours--sp-v11-sections-32-wire-break-and-33-spikes) (zero real neighbours) | All casts, incl. self-test | TEMP → probably bad | none | ✅ Implemented (narrowed scope) |
@@ -123,10 +123,14 @@ run.
 
 Self-test casts are excluded from the published NetCDF, but a *failed*
 self-test (temperature variation ≥0.005°C, `TEST_PROBE_MAX_TEMPERATURE_VARIATION_C`)
-still gets a warning logged before it's dropped — the cookbook frames this
+still gets a warning logged before it's dropped — the cookbook itself frames this
 as a recorder-health alarm ("repeated failures can indicate poor earthing
 or other system errors"), not a per-profile data flag, so it has to surface
-somewhere other than a QC flag nobody downstream will ever read.
+somewhere other than a QC flag nobody downstream will ever read (the cast is
+excluded either way). **This pipeline's own implementation still downgrades the
+excluded cast's own `temperature_qc`/history to match** (NDO-767) — "not a
+per-profile data flag" describes the cookbook's own conceptual framing of the
+alarm, not a claim that this code leaves `temperature_qc` untouched.
 
 ### Surface Transients — CS (v2.1 section 4.3.1, supersedes v1.1 section 2.1's CSA)
 
@@ -168,9 +172,16 @@ un-masking against the neighbour-average spike test produced 375 new flags, ever
 *inside* the region this check itself already flags (the classic transient shape — an
 erroneously hot first reading rapidly settling, e.g. 24°C → 14°C → 12°C) — zero spillover into
 genuinely deeper, previously-good data. Confirmed again after deploying the real fix: exactly
-2,214 samples recovered, and the neighbour-average spike test's own real-archive flag count
-(112 profiles) is unchanged from before this fix — the "new" flags found during design were
-already accounted for, not a regression introduced by shipping it.
+2,214 samples recovered. **Corrected 2026-09-12 (NDO-767) — the claim below was imprecise, not
+wrong, but easy to misread:** the neighbour-average spike test's *deeper-than-the-surface-band*
+flag count (112 profiles, 190 samples — the same figure the "Neighbour-average Spikes retest"
+section below validates) is genuinely unchanged from before this fix. But with real surface data
+now visible to every TEMP check for the first time, the check's *overall* real-archive flag count
+did rise, exactly as the 375-new-flags simulation above predicted — 351 of the archive's 370
+casts now carry at least one SP history entry (most starting around 0.65 m depth, the classic
+surface-transient shape), up from 112. That rise is the expected, already-accounted-for
+consequence of un-masking real data, not a regression; the number that stayed flat is the
+*pre-existing* deeper-water baseline specifically, not the check's real-archive total.
 
 **Bonus find while deploying, and later corrected: this fix changed which cast
 `is_test_probe_cast()`'s data-driven isothermal-near-1.5°C signal caught, via a second,

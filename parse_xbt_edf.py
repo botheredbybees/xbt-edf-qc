@@ -5,8 +5,10 @@ so the EDF-parsing logic exists in exactly one place.
 """
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -150,13 +152,30 @@ def parse_edf(filepath: str, voyage_id: str) -> Cast:
     except ValueError as exc:
         raise EDFParseError(f"{filepath}: bad latitude/longitude: {exc}") from exc
 
+    # NDO-767: pd.read_csv's fixed `names=` below silently accepts a data table with a
+    # different column count than expected -- verified: a 6-column export shifts every
+    # column one to the left with no error at all (elapsed_s reads resistance's values,
+    # depth_m reads temperature's, etc.), and a 4-column one leaves sound_velocity_ms
+    # entirely NaN. The header's own "Num Data Fields" line is the EDF format's stated
+    # column count -- checked against the number of names this parser actually expects,
+    # so a misaligned export is rejected up front instead of silently misreading columns.
+    _EXPECTED_DATA_FIELD_NAMES = [
+        "elapsed_s", "resistance_ohms", "depth_m", "temperature_c", "sound_velocity_ms",
+    ]
+    declared_field_count = header.get("Num Data Fields")
+    if declared_field_count != str(len(_EXPECTED_DATA_FIELD_NAMES)):
+        raise EDFParseError(
+            f"{filepath}: header declares Num Data Fields={declared_field_count!r}, "
+            f"this parser only supports {len(_EXPECTED_DATA_FIELD_NAMES)}-column exports"
+        )
+
     try:
         table = pd.read_csv(
             filepath,
             skiprows=data_start_line + 1,
             delimiter="\t",
             encoding="cp1252",
-            names=["elapsed_s", "resistance_ohms", "depth_m", "temperature_c", "sound_velocity_ms"],
+            names=_EXPECTED_DATA_FIELD_NAMES,
         )
     except Exception as exc:  # pandas can raise several distinct error types here
         raise EDFParseError(f"{filepath}: could not parse data table: {exc}") from exc
@@ -530,8 +549,19 @@ FAULT_POSITION_ERROR = 1 << 18    # 262144
 FAULT_PROBE_TYPE_ERROR = 1 << 21  # 2097152
 
 _INSTITUTION = "Australian Antarctic Division"
-_SOFTWARE = "cron_jobs_on_skippy/parse_xbt_edf.py"
-_SOFTWARE_RELEASE = "1.0"
+# NDO-766: this used to be a hardcoded "cron_jobs_on_skippy/parse_xbt_edf.py"/"1.0" -- both
+# wrong even at the time (the file had already moved to this standalone repo, 2026-09-08) and
+# never changed across five behaviour-changing releases (NDO-705/708/728/704/729), so every
+# published NetCDF's own provenance record couldn't tell a pre-fix file from a post-fix one.
+# Derived from the installed package's own version so a `pip install --upgrade`/`--force-
+# reinstall` to a new release is automatically reflected -- falls back to "0.0.0+unknown"
+# only for an editable/uninstalled checkout (e.g. running straight from a git clone with no
+# `pip install -e .`), which should never happen for a real production run.
+try:
+    _SOFTWARE_RELEASE = importlib.metadata.version("xbt-edf-qc")
+except importlib.metadata.PackageNotFoundError:
+    _SOFTWARE_RELEASE = "0.0.0+unknown"
+_SOFTWARE = "xbt-edf-qc/parse_xbt_edf.py"
 _QC_STEP = "AADC_XBT_QC"
 
 
@@ -631,6 +661,13 @@ class CastQC:
         self.depth_qc[np.isnan(self.cast.depth_m)] = GTSPP_MISSING
 
 
+# NDO-765: matches "test" unless it's glued directly onto a preceding letter (the
+# "latest"/"contest"/"attest"/"protest" false-positive case) -- see
+# _has_textual_test_indication()'s own docstring for why this is a negative lookbehind
+# on a letter specifically, not a `\b`-based word-boundary match.
+_TEST_INDICATION_RE = re.compile(r"(?<![a-zA-Z])test", re.IGNORECASE)
+
+
 def is_test_probe_cast(cast: Cast) -> bool:
     """True if this cast is a system self-test rather than a real, deployed cast.
 
@@ -677,10 +714,29 @@ def is_test_probe_cast(cast: Cast) -> bool:
     )
 
 
-def _has_textual_test_indication(cast: Cast) -> bool:
-    """True if Serial Number, Memo, or the source filename mentions "test"."""
-    haystacks = (cast.serial_number, cast.memo, os.path.basename(cast.source_file))
-    return any("test" in haystack.lower() for haystack in haystacks)
+def _has_textual_test_indication(cast: Cast) -> str | None:
+    """Name of the first field (serial_number, memo, or filename) that mentions
+    a self-test, or None if none do.
+
+    NDO-765: a plain `"test" in haystack.lower()` substring match also fires on
+    Memo text that has nothing to do with a self-test -- "Latest", "contest",
+    "attest", "protest" all contain "test". Real spellings seen in the
+    archive ("TestProbe", "Test Probe", "Test", "BT_Test_Device",
+    "VT1A_testprobe...") all have "test" preceded by either nothing (start of
+    string), a space, or a non-letter separator (digit/underscore) -- never by
+    another letter. `latest`/`contest`/`attest`/`protest` all have "test"
+    glued directly onto another letter. A negative lookbehind for a preceding
+    letter distinguishes them without needing a `\\b`-based match, which would
+    itself wrongly reject "BT_Test_Device" and "VT1A_testprobe..." (`_` counts
+    as a word character, so there's no `\\b` between it and "test")."""
+    for field_name, haystack in (
+        ("serial_number", cast.serial_number),
+        ("memo", cast.memo),
+        ("filename", os.path.basename(cast.source_file)),
+    ):
+        if _TEST_INDICATION_RE.search(haystack):
+            return field_name
+    return None
 
 
 def _is_isothermal_near_1_5c(temperature_c: np.ndarray, depth_m: np.ndarray) -> bool:
@@ -832,8 +888,15 @@ def _flag_temperature_out_of_depth_band_range(qc: CastQC, now: datetime) -> None
     still handled by the shared, non-banded _flag_array_out_of_range."""
     temp = qc.cast.temperature_c
     depth = qc.cast.depth_m
+    # NDO-767: `deep = ~shallow` used to make a NaN depth count as "deep" --
+    # `NaN < X` is always False, so `~(depth < X)` is True for a NaN depth,
+    # judging that row's TEMP against the tighter deep-band ceiling despite
+    # not actually knowing its depth. Explicit `>=`/`<` comparisons both
+    # evaluate False against NaN, so a NaN-depth row now falls into neither
+    # band and TEMP is left alone -- depth_qc already correctly flags it
+    # GTSPP_MISSING, and this check has nothing reliable to judge TEMP against.
     shallow = depth < TEMP_DEEP_BAND_DEPTH_M
-    deep = ~shallow
+    deep = depth >= TEMP_DEEP_BAND_DEPTH_M
 
     shallow_bad = shallow & ((temp < TEMP_VALID_MIN) | (temp > TEMP_VALID_MAX))
     deep_bad = deep & ((temp < TEMP_VALID_MIN) | (temp > TEMP_DEEP_VALID_MAX))
@@ -1317,19 +1380,29 @@ def apply_qc(casts: list) -> list:
 
     for cast in ordered:
         is_test_probe = is_test_probe_cast(cast)
-        if is_test_probe and not _has_textual_test_indication(cast):
-            # NDO-791: caught only by the isothermal-near-1.5 data signature, with a
-            # real Serial Number/Memo/filename -- this is a genuine probe launched
-            # with the self-test resistor still clipped in, not a bench test. Worth
-            # its own log line: a real, numbered probe was wasted on this cast.
-            logger.warning(
-                "Cast excluded as a test probe via the isothermal-1.5degC data signature "
-                "alone (Serial Number %r, %s) -- likely a real probe launched with the "
-                "self-test resistor still connected, not a bench self-test.",
-                cast.serial_number, os.path.basename(cast.source_file),
-            )
+        matching_field = _has_textual_test_indication(cast)
+        # NDO-765: every exclusion is logged, naming which field/signal matched -- silent
+        # exclusion meant nobody could tell which casts a run had dropped or why.
+        if is_test_probe:
+            if matching_field is not None:
+                logger.info(
+                    "Cast excluded as a test probe: %s matched (Serial Number %r, %s)",
+                    matching_field, cast.serial_number, os.path.basename(cast.source_file),
+                )
+            else:
+                # NDO-791: caught only by the isothermal-near-1.5 data signature, with a
+                # real Serial Number/Memo/filename -- this is a genuine probe launched
+                # with the self-test resistor still clipped in, not a bench test. Worth
+                # its own log level: a real, numbered probe was wasted on this cast.
+                logger.warning(
+                    "Cast excluded as a test probe via the isothermal-1.5degC data signature "
+                    "alone (Serial Number %r, %s) -- likely a real probe launched with the "
+                    "self-test resistor still connected, not a bench self-test.",
+                    cast.serial_number, os.path.basename(cast.source_file),
+                )
 
         qc = CastQC(cast=cast)
+        speed_check_failed = False
 
         if not is_test_probe:
             _flag_surface_transient(qc, now)
@@ -1337,6 +1410,7 @@ def apply_qc(casts: list) -> list:
             if previous_real_cast is not None:
                 speed_knots = _speed_between_casts_knots(previous_real_cast, cast)
                 if speed_knots is not None and speed_knots > MAX_PLAUSIBLE_SPEED_KNOTS:
+                    speed_check_failed = True
                     # The cookbook treats a failed speed check as evidence of
                     # EITHER a position error (PE, section 4.2.4) OR a time
                     # error (TE, section 4.2.5) -- two distinct codes with two
@@ -1468,8 +1542,18 @@ def apply_qc(casts: list) -> list:
             # than alongside the speed check.
             if previous_real_qc is not None:
                 _flag_repeat_cast_disagreement(previous_real_qc, qc, now)
-            previous_real_cast = cast
-            previous_real_qc = qc
+            # NDO-764: a cast that just failed the speed check (implausible position/time,
+            # PE+TE) must NOT become the reference for the *next* cast's speed check -- its
+            # own position/time is exactly what's in question. Anchor to the last cast that
+            # actually passed instead, so one bad fix doesn't cascade into downgrading an
+            # otherwise-good cast's entire TEMP profile purely for being measured from a
+            # known-bad reference point. Real case: voyage 202324020, a hemisphere-flipped
+            # position (+51.8, -138.1) failed speed against its predecessor and then, before
+            # this fix, became the reference the *next* (genuinely fine) cast's speed was
+            # measured from, failing it too.
+            if not speed_check_failed:
+                previous_real_cast = cast
+                previous_real_qc = qc
 
         results.append(qc)
 
